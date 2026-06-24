@@ -1,0 +1,148 @@
+//@version=6
+// Ve_HT_KC — Tự động vẽ vùng Hỗ trợ / Kháng cự (đa khung: TF hiện tại + H4)
+indicator("Ve_HT_KC", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ===== Inputs =====
+grpPiv = "Phát hiện pivot"
+leftBars   = input.int(5, "Số nến trái (pivot)",  minval=1, group=grpPiv)
+rightBars  = input.int(5, "Số nến phải (pivot)",  minval=1, group=grpPiv)
+minTouches = input.int(3, "Số lần chạm tối thiểu để vẽ", minval=1, group=grpPiv)
+
+grpZone = "Vùng"
+minWidthPct = input.float(0.10, "Bề rộng vùng tối thiểu (% giá)", minval=0.0, step=0.01, group=grpZone) / 100.0
+mergePct    = input.float(0.25, "Gộp cụm khi cách dưới (% giá)",  minval=0.01, step=0.01, group=grpZone) / 100.0
+maxDistPct  = input.float(6.0,  "Chỉ vẽ vùng trong khoảng ±% giá", minval=0.5, step=0.5, group=grpZone) / 100.0
+maxPerSide  = input.int(3, "Số vùng tối đa mỗi phía (mỗi khung)", minval=1, maxval=20, group=grpZone)
+
+grpMTF = "Đa khung (MTF)"
+useHTF = input.bool(true,  "Bật vùng khung H4", group=grpMTF)
+htf    = input.timeframe("240", "Khung lớn", group=grpMTF)
+
+grpStyle = "Hiển thị"
+resCol        = input.color(color.orange, "Kháng cự (TF hiện tại)", group=grpStyle)
+supCol        = input.color(color.teal,   "Hỗ trợ (TF hiện tại)",   group=grpStyle)
+htfResCol     = input.color(color.red,    "Kháng cự H4",            group=grpStyle)
+htfSupCol     = input.color(color.green,  "Hỗ trợ H4",              group=grpStyle)
+strongTouches = input.int(5, "Ngưỡng 'mạnh' (số lần chạm)", minval=2, group=grpStyle)
+showLabels    = input.bool(true, "Hiện nhãn giá", group=grpStyle)
+labelOffset   = input.int(5, "Đẩy nhãn sang phải (số nến)", minval=0, group=grpStyle)
+
+// Tên khung gọn (60 -> H1, 240 -> H4, ...)
+f_tfName(tf) =>
+    tf == "60" ? "H1" : tf == "240" ? "H4" : tf == "15" ? "M15" : tf == "30" ? "M30" : tf == "5" ? "M5" : tf == "1" ? "M1" : tf == "D" ? "D" : tf == "W" ? "W" : tf
+curTF = f_tfName(timeframe.period)
+
+// ===== Trạng thái (cụm pivot) =====
+var array<float> cCen = array.new<float>()   // TF hiện tại
+var array<float> cMin = array.new<float>()
+var array<float> cMax = array.new<float>()
+var array<int>   cTch = array.new<int>()
+var array<float> hCen = array.new<float>()   // H4
+var array<float> hMin = array.new<float>()
+var array<float> hMax = array.new<float>()
+var array<int>   hTch = array.new<int>()
+var array<box>   boxes  = array.new<box>()
+var array<label> labels = array.new<label>()
+
+// Gộp mức giá p vào cụm gần nhất (cập nhật tâm + biên min/max), hoặc tạo cụm mới
+f_merge(cen, mn, mx, tch, p, tol) =>
+    found = false
+    n = array.size(cen)
+    if n > 0
+        for i = 0 to n - 1
+            if not found and math.abs(array.get(cen, i) - p) <= tol
+                c = array.get(tch, i) + 1
+                array.set(cen, i, (array.get(cen, i) * (c - 1) + p) / c)
+                array.set(mn, i, math.min(array.get(mn, i), p))
+                array.set(mx, i, math.max(array.get(mx, i), p))
+                array.set(tch, i, c)
+                found := true
+    if not found
+        array.push(cen, p)
+        array.push(mn, p)
+        array.push(mx, p)
+        array.push(tch, 1)
+
+// Điểm vùng = số chạm + độ gần giá (để chọn đúng N vùng mỗi phía)
+f_score(c, t) =>
+    t - math.abs(c - close) / (close * maxDistPct)
+
+// Ngưỡng điểm của vùng tốt thứ maxPerSide mỗi phía
+f_threshold(cen, tch, wantRes) =>
+    tmp = array.new<float>()
+    n = array.size(cen)
+    if n > 0
+        for i = 0 to n - 1
+            c = array.get(cen, i)
+            t = array.get(tch, i)
+            within = math.abs(c - close) <= close * maxDistPct
+            side   = wantRes ? (c >= close) : (c < close)
+            if within and side and t >= minTouches
+                array.push(tmp, f_score(c, t))
+    array.sort(tmp, order.descending)
+    sz = array.size(tmp)
+    sz == 0 ? 1e12 : array.get(tmp, math.min(maxPerSide, sz) - 1)
+
+// Vẽ vùng (box) + nhãn tên/giá
+f_draw(cen, mn, mx, tch, isHTF) =>
+    resThr = f_threshold(cen, tch, true)
+    supThr = f_threshold(cen, tch, false)
+    minHalf = close * minWidthPct / 2.0
+    n = array.size(cen)
+    if n > 0
+        for i = 0 to n - 1
+            t      = array.get(tch, i)
+            c      = array.get(cen, i)
+            isRes  = c >= close
+            within = math.abs(c - close) <= close * maxDistPct
+            thr    = isRes ? resThr : supThr
+            if t >= minTouches and within and f_score(c, t) >= thr
+                lo = array.get(mn, i)
+                hi = array.get(mx, i)
+                if hi - lo < 2 * minHalf
+                    lo := c - minHalf
+                    hi := c + minHalf
+                strong = t >= strongTouches
+                col    = isHTF ? (isRes ? htfResCol : htfSupCol) : (isRes ? resCol : supCol)
+                bg     = color.new(col, strong ? 72 : 88)
+                bw     = strong ? 2 : 1
+                b = box.new(bar_index - 1, hi, bar_index, lo, border_color=col, border_width=bw, bgcolor=bg, extend=extend.both)
+                array.push(boxes, b)
+                if showLabels
+                    tag = (isRes ? "KC" : "HT") + " " + (isHTF ? "H4" : curTF)
+                    rng = str.tostring(lo, format.mintick) + "–" + str.tostring(hi, format.mintick)
+                    txt = tag + " " + rng + " (" + str.tostring(t) + " chạm)" + (strong ? " ⭐" : "")
+                    lb = label.new(bar_index + labelOffset, (lo + hi) / 2.0, txt, xloc=xloc.bar_index, style=label.style_label_left, color=color.new(col, 0), textcolor=color.white, size=strong ? size.normal : size.small)
+                    array.push(labels, lb)
+
+// ===== Thu thập pivot =====
+tol = close * mergePct
+ph = ta.pivothigh(leftBars, rightBars)
+pl = ta.pivotlow(leftBars, rightBars)
+if not na(ph)
+    f_merge(cCen, cMin, cMax, cTch, ph, tol)
+if not na(pl)
+    f_merge(cCen, cMin, cMax, cTch, pl, tol)
+
+htfActive = useHTF and htf != timeframe.period
+htfPh = request.security(syminfo.tickerid, htf, ta.pivothigh(leftBars, rightBars), lookahead=barmerge.lookahead_off)
+htfPl = request.security(syminfo.tickerid, htf, ta.pivotlow(leftBars, rightBars),  lookahead=barmerge.lookahead_off)
+if htfActive
+    if not na(htfPh) and (na(htfPh[1]) or htfPh != htfPh[1])
+        f_merge(hCen, hMin, hMax, hTch, htfPh, tol)
+    if not na(htfPl) and (na(htfPl[1]) or htfPl != htfPl[1])
+        f_merge(hCen, hMin, hMax, hTch, htfPl, tol)
+
+// ===== Vẽ lại trên nến cuối =====
+if barstate.islast
+    if array.size(boxes) > 0
+        for i = 0 to array.size(boxes) - 1
+            box.delete(array.get(boxes, i))
+    if array.size(labels) > 0
+        for i = 0 to array.size(labels) - 1
+            label.delete(array.get(labels, i))
+    array.clear(boxes)
+    array.clear(labels)
+    f_draw(cCen, cMin, cMax, cTch, false)
+    if htfActive
+        f_draw(hCen, hMin, hMax, hTch, true)
