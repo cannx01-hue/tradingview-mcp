@@ -17,6 +17,13 @@ if exist "%LOCALAPPDATA%\TradingView\TradingView.exe" set "TV_EXE=%LOCALAPPDATA%
 if exist "%PROGRAMFILES%\TradingView\TradingView.exe" set "TV_EXE=%PROGRAMFILES%\TradingView\TradingView.exe"
 if exist "%PROGRAMFILES(x86)%\TradingView\TradingView.exe" set "TV_EXE=%PROGRAMFILES(x86)%\TradingView\TradingView.exe"
 
+REM Check WindowsApps (MSIX) install — version-independent, no recursive scan
+if "%TV_EXE%"=="" (
+    for /d %%D in ("%PROGRAMFILES%\WindowsApps\TradingView.Desktop_*__*") do (
+        if exist "%%D\TradingView.exe" set "TV_EXE=%%D\TradingView.exe"
+    )
+)
+
 REM Check MSIX / Windows Store installs
 if "%TV_EXE%"=="" (
     for /f "tokens=*" %%i in ('dir /s /b "%PROGRAMFILES%\WindowsApps\TradingView*\TradingView.exe" 2^>nul') do set "TV_EXE=%%i"
