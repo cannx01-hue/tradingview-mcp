@@ -122,6 +122,24 @@ f_draw(cen, mn, mx, tch, isHTF) =>
                     lb = label.new(labelX, (lo + hi) / 2.0, txt, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(col, 0), textcolor=color.white, size=strong ? size.normal : size.small)
                     array.push(labels, lb)
 
+// Khoảng cách nhỏ nhất từ giá tới một vùng (cụm đủ số chạm) trong alertDist; trả [dist, lo, hi]
+f_near(cen, mn, mx, tch) =>
+    float bestD = na
+    float bestLo = na
+    float bestHi = na
+    n = array.size(cen)
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(tch, i) >= minTouches
+                lo = array.get(mn, i)
+                hi = array.get(mx, i)
+                d = close > hi ? close - hi : close < lo ? lo - close : 0.0
+                if d <= alertDist and (na(bestD) or d < bestD)
+                    bestD := d
+                    bestLo := lo
+                    bestHi := hi
+    [bestD, bestLo, bestHi]
+
 // ===== Thu thập pivot =====
 tol = close * mergePct
 ph = ta.pivothigh(leftBars, rightBars)
@@ -140,14 +158,21 @@ if htfActive
     if not na(htfPl) and (na(htfPl[1]) or htfPl != htfPl[1])
         f_merge(hCen, hMin, hMax, hTch, htfPl, tol)
 
-// ===== Nhấp nháy + trạng thái cảnh báo =====
-var int    blinkCtr = 0
-var bool   g_near   = false
-var float  g_dist   = na
-var string g_msg    = ""
+// ===== Nhấp nháy + kiểm tra giá gần vùng (mỗi nến) =====
+var int blinkCtr = 0
 if barstate.isrealtime
     blinkCtr += 1
 blink = blinkCtr % 2 == 0
+
+[dC, loC, hiC] = f_near(cCen, cMin, cMax, cTch)
+[dH, loH, hiH] = f_near(hCen, hMin, hMax, hTch)
+useC = not na(dC) and (na(dH) or dC <= dH)
+useH = not na(dH) and not useC
+g_dist = useC ? dC : useH ? dH : na
+g_lo   = useC ? loC : useH ? loH : na
+g_hi   = useC ? hiC : useH ? hiH : na
+g_near = alertOn and not na(g_dist)
+g_msg  = g_near ? "Ve_HT_KC: gia " + str.tostring(close, format.mintick) + " sap cham vung " + str.tostring(g_lo, format.mintick) + "-" + str.tostring(g_hi, format.mintick) + " (cach " + str.tostring(g_dist, format.mintick) + ")" : ""
 
 // ===== Vẽ lại trên nến cuối =====
 if barstate.islast
@@ -163,29 +188,16 @@ if barstate.islast
     if htfActive
         f_draw(hCen, hMin, hMax, hTch, true)
 
-    // --- Kiểm tra giá có gần vùng đã vẽ (trong alertDist) không ---
-    g_near := false
-    g_dist := na
-    float nearLo = na
-    float nearHi = na
-    if array.size(boxes) > 0
-        for i = 0 to array.size(boxes) - 1
-            bx = array.get(boxes, i)
-            bt = box.get_bottom(bx)
-            tp = box.get_top(bx)
-            d = close > tp ? close - tp : close < bt ? bt - close : 0.0
-            if d <= alertDist and (na(g_dist) or d < g_dist)
-                g_dist := d
-                g_near := true
-                nearLo := bt
-                nearHi := tp
-    if alertOn and g_near
-        g_msg := "Ve_HT_KC: gia " + str.tostring(close, format.mintick) + " sap cham vung " + str.tostring(nearLo, format.mintick) + "-" + str.tostring(nearHi, format.mintick) + " (cach " + str.tostring(g_dist, format.mintick) + ")"
+    // --- Nhãn cảnh báo nhấp nháy khi giá gần vùng ---
+    if g_near
         warnTxt = "⚠ SẮP CHẠM VÙNG (cách " + str.tostring(g_dist, format.mintick) + ")"
         lb = label.new(bar_index, close, warnTxt, xloc=xloc.bar_index, style=label.style_label_down, color=blink ? flashCol : color.new(flashCol, 100), textcolor=blink ? color.black : color.new(color.black, 100), size=size.normal)
         array.push(labels, lb)
 
 // ===== Nền nhấp nháy + phát Alert (beep do TradingView khi bạn bật âm thanh) =====
-bgcolor(alertOn and barstate.islast and g_near and blink ? color.new(flashCol, 80) : na, title="Nhấp nháy gần vùng")
-if alertOn and barstate.islast and g_near
+bgcolor(barstate.islast and g_near and blink ? color.new(flashCol, 80) : na, title="Nhấp nháy gần vùng")
+// alert() động — chọn "Any alert() function call" khi tạo alert
+if g_near
     alert(g_msg, alert.freq_once_per_bar)
+// alertcondition() — điều kiện CÓ TÊN, hiện trong ô Condition để chọn trực tiếp
+alertcondition(g_near, title="Giá gần vùng HT/KC", message="Ve_HT_KC: giá sắp chạm vùng hỗ trợ/kháng cự (cách <= ngưỡng đã đặt)")
