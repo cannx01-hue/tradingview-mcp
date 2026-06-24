@@ -1,8 +1,71 @@
-# TradingView MCP — Claude Instructions
+# CLAUDE.md
 
-68 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Decision Tree — Which Tool When
+A local MCP server + `tv` CLI that reads and controls a live TradingView Desktop chart by evaluating JavaScript inside the running Electron app over Chrome DevTools Protocol (CDP) on `localhost:9222`. No TradingView servers are contacted.
+
+## Commands
+
+```bash
+npm install
+npm start                 # run the MCP server over stdio (src/server.js)
+npm run tv -- <command>   # run the CLI without linking (e.g. npm run tv -- status)
+node src/cli/index.js status   # equivalent direct invocation
+
+# Tests (run offline — no TradingView needed unless noted)
+npm test                  # e2e + pine_analyze suites
+npm run test:unit         # pine_analyze + cli
+npm run test:all          # e2e + pine_analyze + cli
+npm run test:cli          # CLI routing only
+
+# Run one test file
+node --test tests/sanitization.test.js
+# Run one test by name
+node --test --test-name-pattern "safeString" tests/sanitization.test.js
+```
+
+Notes:
+- ESM project (`"type": "module"`) targeting Node 18+. Only two runtime deps: `@modelcontextprotocol/sdk` and `chrome-remote-interface`.
+- `package.json` test scripts do **not** include every test file. `tests/sanitization.test.js` and `tests/replay.test.js` exist but are only run when invoked directly — run them too when touching sanitization, chart, drawing, or replay core.
+- Most tests are fully offline (mocked CDP). The e2e suite expects TradingView running with `--remote-debugging-port=9222`; launch via `scripts/launch_tv_debug*.{bat,sh}` or the `tv_launch` tool.
+
+## Architecture
+
+Three layers per feature area, plus a parallel CLI surface. To add or change a capability you almost always touch the same-named file in each layer.
+
+```
+MCP tool (src/tools/X.js)  ──┐
+                             ├──> core logic (src/core/X.js) ──> connection.js ──> CDP ──> TradingView
+CLI command (src/cli/commands/X.js) ──┘
+```
+
+- **`src/connection.js`** — singleton CDP client (lazy `getClient()` with liveness check + exponential-backoff reconnect). `evaluate(expr)` / `evaluateAsync(expr)` run a JS expression in the page and return its value. `KNOWN_PATHS` holds the discovered internal TradingView API paths (e.g. `window.TradingViewApi._activeChartWidgetWV.value()`). Exports the two sanitizers `safeString()` and `requireFinite()`.
+- **`src/core/*.js`** — the real work. Each function builds a string of JavaScript, calls `evaluate`/`evaluateAsync`, and returns a plain `{ success, ... }` object. **No MCP types here** — core is the reusable layer (re-exported as the `./core` package entry via `src/core/index.js`). This is the layer to edit for behavior changes.
+- **`src/tools/*.js`** — thin MCP adapters. Each `registerXTools(server)` defines tools with a Zod input schema, calls the matching `core.fn(args)`, and wraps the result with `jsonResult()` (from `src/tools/_format.js`). Errors are caught and returned as `jsonResult({ success:false, error }, true)`. `src/server.js` calls every `registerXTools` and holds the tool-selection guide that ships to the model.
+- **`src/cli/*`** — a second adapter over the same core. `src/cli/index.js` imports every `commands/*.js` (each self-registers via `router.register(name, {handler})`) then `run(argv)`. `router.js` is a zero-dependency `parseArgs` dispatcher with subcommand support; handlers receive `(values, positionals)` and return the object that gets JSON-printed. Exit codes: `0` success, `1` error, `2` connection failure.
+- **`src/wait.js`** — `waitForChartReady()` polls the DOM/bar state so mutations settle before returning.
+
+### Key conventions
+
+- **Dependency injection for testability.** Core functions that mutate state take an optional `_deps` and resolve it through a local `_resolve(deps)` that falls back to the real `evaluate`/`evaluateAsync`/`waitForChartReady`. Tests pass mock `_deps` (see `tests/sanitization.test.js`) to assert on the exact JS string sent to CDP without a live chart. Preserve this pattern when adding mutating core functions.
+- **CDP injection safety is mandatory.** Any value interpolated into an `evaluate` string must go through `safeString(str)` (JSON-stringifies to a quoted JS literal) or `requireFinite(n, name)` (rejects NaN/Infinity before it can persist to TradingView cloud state). Never template a raw user string into evaluated JS. `tests/sanitization.test.js` audits the core sources for this.
+- **Return shape.** Everything returns `{ success: true/false, ... }`; tools wrap it, CLI prints it.
+- **Internal APIs are undocumented and brittle.** Logic depends on `window.TradingViewApi._...` internals that can change between TradingView releases. Probe with `tv ui eval` / `ui_evaluate` and update `KNOWN_PATHS` rather than scattering paths.
+
+### Adding a tool/command
+
+1. Add the function to `src/core/X.js` (build the JS string, sanitize inputs, return `{success,...}`).
+2. Register an MCP tool in `src/tools/X.js` (Zod schema → `core.fn` → `jsonResult`).
+3. Register a CLI command in `src/cli/commands/X.js` (`register(name, {handler})`).
+4. Add offline tests with mocked `_deps`; for new tool groups also wire `registerXTools` into `src/server.js` and import the command file in `src/cli/index.js`.
+
+---
+
+# Operating the tools (decision tree)
+
+The sections below guide *using* the 68+ tools against a live chart. Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`.
+
+## Which tool when
 
 ### "What's on my chart right now?"
 1. `chart_get_state` → symbol, timeframe, chart type, list of all indicators with entity IDs
@@ -84,7 +147,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `tv_launch` → auto-detect and launch TradingView with CDP on Mac/Win/Linux
 - `tv_health_check` → verify connection is working
 
-## Context Management Rules
+## Context management rules
 
 These tools can return large payloads. Follow these rules to avoid context bloat:
 
@@ -97,7 +160,7 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 7. **Call `chart_get_state` once** at the start to get entity IDs, then reference them — don't re-call repeatedly
 8. **Cap your OHLCV requests** — `count: 20` for quick analysis, `count: 100` for deeper work, `count: 500` only when specifically needed
 
-### Output Size Estimates (compact mode)
+### Output size estimates (compact mode)
 | Tool | Typical Output |
 |------|---------------|
 | `quote_get` | ~200 bytes |
@@ -110,7 +173,7 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 | `data_get_ohlcv` (100 bars) | ~8 KB |
 | `capture_screenshot` | ~300 bytes (returns file path, not image data) |
 
-## Tool Conventions
+## Tool conventions
 
 - All tools return `{ success: true/false, ... }`
 - Entity IDs (from `chart_get_state`) are session-specific — don't cache across sessions
@@ -119,11 +182,3 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Screenshots save to `screenshots/` directory with timestamps
 - OHLCV capped at 500 bars, trades at 20 per request
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
-
-## Architecture
-
-```
-Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9222) ←→ TradingView Desktop (Electron)
-```
-
-Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`
