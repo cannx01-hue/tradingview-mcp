@@ -25,7 +25,7 @@ htfResCol     = input.color(color.red,    "Kháng cự H4",            group=grp
 htfSupCol     = input.color(color.green,  "Hỗ trợ H4",              group=grpStyle)
 strongTouches = input.int(5, "Ngưỡng 'mạnh' (số lần chạm)", minval=2, group=grpStyle)
 showLabels    = input.bool(true, "Hiện nhãn giá", group=grpStyle)
-labelOffset   = input.int(5, "Đẩy nhãn sang phải (số nến)", minval=0, group=grpStyle)
+labelOffset   = input.int(3, "Đẩy nhãn vào trong từ mép trái (số nến)", minval=0, group=grpStyle)
 
 // Tên khung gọn (60 -> H1, 240 -> H4, ...)
 f_tfName(tf) =>
@@ -112,7 +112,9 @@ f_draw(cen, mn, mx, tch, isHTF) =>
                     tag = (isRes ? "KC" : "HT") + " " + (isHTF ? "H4" : curTF)
                     rng = str.tostring(lo, format.mintick) + "–" + str.tostring(hi, format.mintick)
                     txt = tag + " " + rng + " (" + str.tostring(t) + " chạm)" + (strong ? " ⭐" : "")
-                    lb = label.new(bar_index + labelOffset, (lo + hi) / 2.0, txt, xloc=xloc.bar_index, style=label.style_label_left, color=color.new(col, 0), textcolor=color.white, size=strong ? size.normal : size.small)
+                    // Đặt nhãn ở mép TRÁI vùng nhìn để luôn thấy đủ giá + số chạm (text mở sang phải)
+                    labelX = chart.left_visible_bar_time + labelOffset * timeframe.in_seconds() * 1000
+                    lb = label.new(labelX, (lo + hi) / 2.0, txt, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(col, 0), textcolor=color.white, size=strong ? size.normal : size.small)
                     array.push(labels, lb)
 
 // ===== Thu thập pivot =====
