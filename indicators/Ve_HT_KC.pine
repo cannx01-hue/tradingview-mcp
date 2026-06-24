@@ -27,6 +27,11 @@ strongTouches = input.int(5, "Ngưỡng 'mạnh' (số lần chạm)", minval=2,
 showLabels    = input.bool(true, "Hiện nhãn giá", group=grpStyle)
 labelOffset   = input.int(3, "Đẩy nhãn vào trong từ mép trái (số nến)", minval=0, group=grpStyle)
 
+grpAlert = "Cảnh báo (Alert)"
+alertOn   = input.bool(true,  "Bật cảnh báo + nhấp nháy khi gần vùng", group=grpAlert)
+alertDist = input.float(5.0,  "Báo khi giá cách vùng (theo giá)", minval=0.0, step=0.5, group=grpAlert)
+flashCol  = input.color(color.yellow, "Màu nhấp nháy", group=grpAlert)
+
 // Tên khung gọn (60 -> H1, 240 -> H4, ...)
 f_tfName(tf) =>
     tf == "60" ? "H1" : tf == "240" ? "H4" : tf == "15" ? "M15" : tf == "30" ? "M30" : tf == "5" ? "M5" : tf == "1" ? "M1" : tf == "D" ? "D" : tf == "W" ? "W" : tf
@@ -135,6 +140,15 @@ if htfActive
     if not na(htfPl) and (na(htfPl[1]) or htfPl != htfPl[1])
         f_merge(hCen, hMin, hMax, hTch, htfPl, tol)
 
+// ===== Nhấp nháy + trạng thái cảnh báo =====
+var int    blinkCtr = 0
+var bool   g_near   = false
+var float  g_dist   = na
+var string g_msg    = ""
+if barstate.isrealtime
+    blinkCtr += 1
+blink = blinkCtr % 2 == 0
+
 // ===== Vẽ lại trên nến cuối =====
 if barstate.islast
     if array.size(boxes) > 0
@@ -148,3 +162,30 @@ if barstate.islast
     f_draw(cCen, cMin, cMax, cTch, false)
     if htfActive
         f_draw(hCen, hMin, hMax, hTch, true)
+
+    // --- Kiểm tra giá có gần vùng đã vẽ (trong alertDist) không ---
+    g_near := false
+    g_dist := na
+    float nearLo = na
+    float nearHi = na
+    if array.size(boxes) > 0
+        for i = 0 to array.size(boxes) - 1
+            bx = array.get(boxes, i)
+            bt = box.get_bottom(bx)
+            tp = box.get_top(bx)
+            d = close > tp ? close - tp : close < bt ? bt - close : 0.0
+            if d <= alertDist and (na(g_dist) or d < g_dist)
+                g_dist := d
+                g_near := true
+                nearLo := bt
+                nearHi := tp
+    if alertOn and g_near
+        g_msg := "Ve_HT_KC: gia " + str.tostring(close, format.mintick) + " sap cham vung " + str.tostring(nearLo, format.mintick) + "-" + str.tostring(nearHi, format.mintick) + " (cach " + str.tostring(g_dist, format.mintick) + ")"
+        warnTxt = "⚠ SẮP CHẠM VÙNG (cách " + str.tostring(g_dist, format.mintick) + ")"
+        lb = label.new(bar_index, close, warnTxt, xloc=xloc.bar_index, style=label.style_label_down, color=blink ? flashCol : color.new(flashCol, 100), textcolor=blink ? color.black : color.new(color.black, 100), size=size.normal)
+        array.push(labels, lb)
+
+// ===== Nền nhấp nháy + phát Alert (beep do TradingView khi bạn bật âm thanh) =====
+bgcolor(alertOn and barstate.islast and g_near and blink ? color.new(flashCol, 80) : na, title="Nhấp nháy gần vùng")
+if alertOn and barstate.islast and g_near
+    alert(g_msg, alert.freq_once_per_bar)
