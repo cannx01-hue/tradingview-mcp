@@ -1,0 +1,142 @@
+// © mInvest — V3 Strategy (backtest cho TC V3)
+//@version=5
+strategy(title="CanNX - mInvest TC V3 Strategy", shorttitle="CanNX TC V3 STR", overlay=true,
+     max_lines_count=200, max_labels_count=200,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     commission_type=strategy.commission.percent, commission_value=0.02, slippage=2,
+     pyramiding=0, calc_on_every_tick=false, process_orders_on_close=false)
+
+// ============================================================
+// THAM SỐ (đồng bộ với indicator TC V3)
+// ============================================================
+ema_fast_len = input.int(21, "EMA Nhanh", group="⚙️ EMA", minval=1)
+ema_slow_len = input.int(55, "EMA Chậm",  group="⚙️ EMA", minval=1)
+
+g_htf = "🧭 Đa khung (MTF)"
+use_htf_h4  = input.bool(true,  "Bắt buộc thuận trend H4", group=g_htf)
+htf_h4      = input.timeframe("240", "Khung trung", group=g_htf)
+use_daily   = input.bool(false, "Bắt buộc thuận trend Daily", group=g_htf)
+htf_d       = input.timeframe("D", "Khung lớn", group=g_htf)
+htf_ema_len = input.int(50, "EMA trend khung lớn", group=g_htf, minval=1)
+
+adx_len       = input.int(14, "Độ dài ADX", group="⚙️ ADX", minval=1)
+adx_threshold = input.float(22, "Ngưỡng ADX", group="⚙️ ADX", minval=1)
+use_di_dir    = input.bool(true, "Yêu cầu +DI/−DI thuận hướng", group="⚙️ ADX")
+
+g_rsi = "📈 RSI"
+use_rsi      = input.bool(true, "Bật lọc RSI", group=g_rsi)
+rsi_len      = input.int(14, "Độ dài RSI", group=g_rsi, minval=1)
+rsi_buy_min  = input.float(45, "Mua: RSI tối thiểu", group=g_rsi)
+rsi_buy_max  = input.float(70, "Mua: RSI tối đa", group=g_rsi)
+rsi_sell_max = input.float(55, "Bán: RSI tối đa", group=g_rsi)
+rsi_sell_min = input.float(30, "Bán: RSI tối thiểu", group=g_rsi)
+
+g_pb = "↩️ Pullback"
+use_pullback = input.bool(true, "Chỉ vào khi hồi về EMA nhanh", group=g_pb)
+pullback_atr = input.float(0.6, "Khoảng cách tối đa tới EMA (xATR)", group=g_pb, minval=0.0, step=0.1)
+
+g_vol = "📊 Volume"
+use_volume = input.bool(false, "Yêu cầu volume > TB", group=g_vol)
+vol_len    = input.int(20, "Độ dài TB volume", group=g_vol, minval=1)
+vol_mult   = input.float(1.0, "Hệ số volume", group=g_vol, minval=0.1, step=0.1)
+
+use_strict_engulf = input.bool(true, "Engulfing chặt", group="🕯️ Mô hình nến")
+
+g_sl = "🎯 SL/TP (ATR)"
+atr_len        = input.int(14, "Độ dài ATR", group=g_sl, minval=1)
+rr_ratio       = input.float(1.8, "Tỷ lệ RR", group=g_sl, minval=0.1, step=0.1)
+sl_buffer_mult = input.float(0.5, "Đệm ATR cho SL", group=g_sl, minval=0.0, step=0.1)
+
+g_trade = "🧩 Giao dịch"
+trade_dir  = input.string("Cả hai", "Hướng giao dịch", options=["Cả hai", "Chỉ Mua", "Chỉ Bán"], group=g_trade)
+use_dates  = input.bool(false, "Giới hạn khoảng thời gian backtest", group=g_trade)
+start_date = input.time(timestamp("2023-01-01"), "Từ ngày", group=g_trade)
+end_date   = input.time(timestamp("2026-12-31"), "Đến ngày", group=g_trade)
+
+// ============================================================
+// TÍNH TOÁN (giống indicator)
+// ============================================================
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+atr_val  = ta.atr(atr_len)
+rsi_val  = ta.rsi(close, rsi_len)
+
+tr_val    = ta.tr(true)
+up_move   = high - high[1]
+down_move = low[1] - low
+plus_dm   = (up_move > down_move and up_move > 0) ? up_move : 0.0
+minus_dm  = (down_move > up_move and down_move > 0) ? down_move : 0.0
+smooth_tr    = ta.rma(tr_val, adx_len)
+smooth_plus  = ta.rma(plus_dm, adx_len)
+smooth_minus = ta.rma(minus_dm, adx_len)
+plus_di  = smooth_tr != 0 ? (smooth_plus  / smooth_tr) * 100 : 0.0
+minus_di = smooth_tr != 0 ? (smooth_minus / smooth_tr) * 100 : 0.0
+dx_val   = (plus_di + minus_di) != 0 ? (math.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100 : 0.0
+adx_val  = ta.rma(dx_val, adx_len)
+
+htf4_up = request.security(syminfo.tickerid, htf_h4, close > ta.ema(close, htf_ema_len), lookahead=barmerge.lookahead_off)
+dtf_up  = request.security(syminfo.tickerid, htf_d,  close > ta.ema(close, htf_ema_len), lookahead=barmerge.lookahead_off)
+
+body       = math.abs(close - open)
+prev_body  = math.abs(close[1] - open[1])
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+bull_engulf = close > open and close[1] < open[1] and open <= close[1] and close >= open[1] and (not use_strict_engulf or body > prev_body)
+hammer      = body > 0 and lower_wick >= 2 * body and upper_wick <= body * 0.5
+bear_engulf = close < open and close[1] > open[1] and open >= close[1] and close <= open[1] and (not use_strict_engulf or body > prev_body)
+shooting    = body > 0 and upper_wick >= 2 * body and lower_wick <= body * 0.5
+pat_bull = bull_engulf or hammer
+pat_bear = bear_engulf or shooting
+
+trend_up = ema_fast > ema_slow
+trend_dn = ema_fast < ema_slow
+adx_ok = adx_val > adx_threshold
+di_up  = not use_di_dir or plus_di > minus_di
+di_dn  = not use_di_dir or minus_di > plus_di
+rsi_buy_ok  = not use_rsi or (rsi_val >= rsi_buy_min and rsi_val <= rsi_buy_max)
+rsi_sell_ok = not use_rsi or (rsi_val <= rsi_sell_max and rsi_val >= rsi_sell_min)
+pull_buy_ok  = not use_pullback or (low  <= ema_fast + pullback_atr * atr_val)
+pull_sell_ok = not use_pullback or (high >= ema_fast - pullback_atr * atr_val)
+avg_vol = ta.sma(volume, vol_len)
+vol_ok  = not use_volume or (volume >= vol_mult * avg_vol)
+htf4_buy_ok  = not use_htf_h4 or htf4_up
+htf4_sell_ok = not use_htf_h4 or not htf4_up
+daily_buy_ok  = not use_daily or dtf_up
+daily_sell_ok = not use_daily or not dtf_up
+
+core_buy  = trend_up and adx_ok and di_up and htf4_buy_ok  and daily_buy_ok  and rsi_buy_ok  and pull_buy_ok  and vol_ok
+core_sell = trend_dn and adx_ok and di_dn and htf4_sell_ok and daily_sell_ok and rsi_sell_ok and pull_sell_ok and vol_ok
+buy_signal  = core_buy  and pat_bull
+sell_signal = core_sell and pat_bear
+
+buy_sl = low  - sl_buffer_mult * atr_val
+buy_tp = close + rr_ratio * (close - buy_sl)
+sell_sl = high + sl_buffer_mult * atr_val
+sell_tp = close - rr_ratio * (sell_sl - close)
+
+// ============================================================
+// VÀO / RA LỆNH
+// ============================================================
+in_window = not use_dates or (time >= start_date and time <= end_date)
+allow_long  = trade_dir != "Chỉ Bán"
+allow_short = trade_dir != "Chỉ Mua"
+
+if in_window and buy_signal and allow_long and buy_sl < close
+    strategy.entry("Long", strategy.long)
+    strategy.exit("L-exit", "Long", stop=buy_sl, limit=buy_tp)
+
+if in_window and sell_signal and allow_short and sell_sl > close
+    strategy.entry("Short", strategy.short)
+    strategy.exit("S-exit", "Short", stop=sell_sl, limit=sell_tp)
+
+// Đóng tất cả khi hết khoảng thời gian backtest
+if use_dates and time > end_date
+    strategy.close_all(comment="Hết khoảng test")
+
+// ============================================================
+// HIỂN THỊ EMA
+// ============================================================
+plot(ema_fast, "EMA Nhanh", color=color.new(color.green, 0), linewidth=2)
+plot(ema_slow, "EMA Chậm",  color=color.new(color.red, 0), linewidth=2)
+plotshape(buy_signal,  "MUA", shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.tiny)
+plotshape(sell_signal, "BÁN", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.tiny)
