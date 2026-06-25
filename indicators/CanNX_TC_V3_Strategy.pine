@@ -33,7 +33,7 @@ rsi_sell_min = input.float(30, "Bán: RSI tối thiểu", group=g_rsi)
 
 g_pb = "↩️ Pullback"
 use_pullback = input.bool(true, "Chỉ vào khi hồi về EMA nhanh", group=g_pb)
-pullback_atr = input.float(0.6, "Khoảng cách tối đa tới EMA (xATR)", group=g_pb, minval=0.0, step=0.1)
+pullback_atr = input.float(0.3, "Khoảng cách tối đa tới EMA (xATR)", group=g_pb, minval=0.0, step=0.1)
 
 g_vol = "📊 Volume"
 use_volume = input.bool(false, "Yêu cầu volume > TB", group=g_vol)
@@ -44,11 +44,11 @@ use_strict_engulf = input.bool(true, "Engulfing chặt", group="🕯️ Mô hìn
 
 g_sl = "🎯 SL/TP (ATR)"
 atr_len        = input.int(14, "Độ dài ATR", group=g_sl, minval=1)
-rr_ratio       = input.float(1.8, "Tỷ lệ RR", group=g_sl, minval=0.1, step=0.1)
+rr_ratio       = input.float(1.2, "Tỷ lệ RR", group=g_sl, minval=0.1, step=0.1)
 sl_buffer_mult = input.float(0.5, "Đệm ATR cho SL", group=g_sl, minval=0.0, step=0.1)
 
 g_trade = "🧩 Giao dịch"
-trade_dir  = input.string("Cả hai", "Hướng giao dịch", options=["Cả hai", "Chỉ Mua", "Chỉ Bán"], group=g_trade)
+trade_dir  = input.string("Chỉ Mua", "Hướng giao dịch", options=["Cả hai", "Chỉ Mua", "Chỉ Bán"], group=g_trade)
 use_dates  = input.bool(false, "Giới hạn khoảng thời gian backtest", group=g_trade)
 start_date = input.time(timestamp("2023-01-01"), "Từ ngày", group=g_trade)
 end_date   = input.time(timestamp("2026-12-31"), "Đến ngày", group=g_trade)
