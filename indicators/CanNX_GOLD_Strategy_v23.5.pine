@@ -1,0 +1,645 @@
+// © mInvest / CanNX — v23.5 H1 ATR-Expansion Quality
+//@version=6
+strategy(title="CanNX - mInvest TC GOLD Strategy v23.5 H1 ATR Quality",
+     shorttitle="CNX v23.5",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=5,
+     margin_long=10,
+     margin_short=10,
+     process_orders_on_close=true,
+     max_bars_back=5000)
+
+// ============================================================================
+// v23.5 — Chốt ATR Expansion làm filter chất lượng entry chính
+//
+// PHÁT HIỆN v23.4 (backtest 7 preset FOREXCOM:XAUUSD H1):
+//  - V23.4 Final / V23.1 Strict (CGB OFF) : net $873, PF 1.82, 61 lệnh, DD $184.
+//  - V23.3 CGB Bench (CGB 1.0R)           : net $178, PF 1.22 → xác nhận CGB phá EV.
+//  - V23.4 ADX Rising  (E2)               : net $220, PF 1.73 → chặt 72% lệnh, hại.
+//  - V23.4 H4 Confirm  (E3)               : net $488, PF 1.68, DD $269 → hại (DD tăng).
+//  - V23.4 Tight Trail (E5)               : net $810 → trail chặt cắt avgWin, vô ích.
+//  - V23.4 ATR Expansion (E4) factor 1.0  : net $620, PF 2.62, 27 lệnh, DD $96, WR 48%
+//        → DUY NHẤT cải thiện CHẤT LƯỢNG: PF 1.82→2.62, DD $184→$96 (−48%),
+//          Ret/DD 4.74→6.42. Đánh đổi net thấp hơn do ít lệnh.
+//
+// THAY ĐỔI v23.5:
+//  [F1] ATR Expansion = BẬT mặc định cho mọi preset V23.5 (filter chất lượng chính).
+//  [F2] GỠ HẲN E2 ADX Rising + E3 H4 Candle Confirm (đều làm giảm PF/net ở v23.4).
+//  [F3] GỠ preset Tight Trail (trail chặt không lợi).
+//  [F4] GỠ HẲN module CGB legacy (~90 dòng) — đã chứng minh phá 80% net ở v23.3.
+//  [F5] Sweep atr_exp_factor đã đo (v23.5): Final = factor 0.90 (net $899, PF 2.35,
+//       DD $156 — thống trị baseline). f0.70 max net $943; f1.10 max PF 3.31 / min DD $89.
+//  Giữ nguyên: strict entry ADX22/PB2.3/Body0.10, RR 3.2, ratchet trailing,
+//  just_acted guard, risk guards (daily loss, DD breaker, cooldown, friday),
+//  bgcolor fix, new_long/new_short cho plotshape/alert, Pine v6.
+//  GIỮ "V23.1 Strict Bench (no ATR)" = baseline $873 để A/B đo tác động ATR Exp.
+// ============================================================================
+
+// ---------------------- 01. PRESET / DIRECTION ----------------------
+group_main = "01. Preset / Direction"
+preset = input.string("V23.5 Final (ATR f0.9)", "Preset",
+     options=["V23.5 Final (ATR f0.9)",
+              "V23.5 ATR f0.70",
+              "V23.5 ATR f0.80",
+              "V23.5 ATR f1.00",
+              "V23.5 ATR f1.10",
+              "V23.1 Strict Bench (no ATR)",
+              "Custom"],
+     group=group_main,
+     tooltip="V23.5 Final: strict entry ADX22/PB2.3/Body0.10, RR3.2, CGB đã gỡ, ATR Expansion ON factor 0.9 (net $899 / PF 2.35 / DD $156 — điểm cân bằng tốt nhất từ sweep v23.5). Các 'ATR fX' = sweep hệ số: thấp hơn = lỏng hơn = nhiều lệnh hơn. V23.1 Strict Bench: ATR Exp OFF = baseline $873/PF1.82 để A/B.")
+trade_direction = input.string("Long Only", "Hướng giao dịch", options=["Long Only", "Short Only", "Both"], group=group_main)
+confirm_on_close = input.bool(true, "Chỉ xác nhận khi nến đóng", group=group_main)
+
+// ---------------------- 02. SESSION FILTER ----------------------
+group_sess = "02. Session Filter"
+use_session_filter = input.bool(false, "Bật lọc phiên giao dịch", group=group_sess)
+session_london = input.session("0800-1600", "London (Etc/UTC)", group=group_sess)
+session_ny = input.session("1300-2200", "New York (Etc/UTC)", group=group_sess)
+in_london = not na(time(timeframe.period, session_london, "Etc/UTC"))
+in_ny = not na(time(timeframe.period, session_ny, "Etc/UTC"))
+session_allowed = not use_session_filter or (in_london or in_ny)
+is_friday_utc = dayofweek(time, "Etc/UTC") == dayofweek.friday
+friday_close_hour_utc = input.int(20, "Đóng lệnh thứ 6 sau (UTC)", group=group_sess, minval=0, maxval=23)
+no_friday_hold = is_friday_utc and hour(time, "Etc/UTC") >= friday_close_hour_utc
+
+// ---------------------- 03. BACKTEST WINDOW ----------------------
+group_bt = "03. Backtest Window"
+use_date_filter = input.bool(true, "Bật giới hạn thời gian backtest", group=group_bt)
+start_time = input.time(timestamp("2020-01-01T00:00:00"), "Ngày bắt đầu", group=group_bt)
+end_time = input.time(timestamp("2027-01-01T00:00:00"), "Ngày kết thúc", group=group_bt)
+in_date_range = not use_date_filter or (time >= start_time and time <= end_time)
+
+// ---------------------- 04. RISK GUARDS ----------------------
+group_guard = "04. Risk Guards"
+use_max_daily_loss = input.bool(true, "Bật giới hạn lỗ trong ngày", group=group_guard)
+max_daily_loss_pct = input.float(2.0, "Max lỗ/ngày (% equity)", group=group_guard, minval=0.5, step=0.5)
+use_max_drawdown = input.bool(true, "Bật circuit breaker drawdown", group=group_guard)
+max_drawdown_pct = input.float(15.0, "Max drawdown (%)", group=group_guard, minval=5.0, step=1.0)
+dd_reset_mode = input.string("Toàn kỳ", "Reset peak drawdown", options=["Toàn kỳ", "Hàng tháng"], group=group_guard)
+use_cooldown = input.bool(true, "Bật cooldown sau loss", group=group_guard)
+cooldown_bars = input.int(5, "Số nến cooldown sau khi thua", group=group_guard, minval=1, step=1)
+
+// ---------------------- 05. POSITION SIZING ----------------------
+group_size = "05. Position Sizing"
+use_risk_sizing = input.bool(true, "Dùng position size theo % risk", group=group_size)
+risk_per_trade_pct = input.float(0.25, "Risk per trade (% equity)", group=group_size, minval=0.10, step=0.05)
+max_qty_cap = input.float(10, "Max qty (lots)", group=group_size, minval=1, step=1)
+fixed_qty_value = input.float(1, "Fixed qty (khi tắt risk sizing)", group=group_size, minval=0.01, step=0.1)
+
+// ---------------------- 06. EMA / TREND ----------------------
+group_ema = "06. EMA / Trend"
+ema_fast_len = input.int(21, "EMA nhanh", group=group_ema, minval=1)
+ema_slow_len = input.int(55, "EMA chậm", group=group_ema, minval=1)
+use_ema_slope = input.bool(false, "Lọc thêm độ dốc EMA", group=group_ema)
+slope_lookback = input.int(3, "Số nến đo độ dốc EMA", group=group_ema, minval=1)
+
+// ---------------------- 07. HTF FILTER ----------------------
+group_htf = "07. HTF EMA Filter"
+use_htf_filter = input.bool(true, "Bật EMA filter khung lớn", group=group_htf)
+htf_tf = input.timeframe("240", "Khung EMA lớn", group=group_htf)
+htf_ema_len = input.int(200, "EMA khung lớn", group=group_htf, minval=1)
+
+// ---------------------- 08. ADX / DMI ----------------------
+group_adx = "08. ADX / DMI"
+adx_len = input.int(14, "Độ dài ADX", group=group_adx, minval=1)
+adx_smoothing = input.int(14, "Làm mượt ADX", group=group_adx, minval=1)
+adx_threshold = input.float(18, "Ngưỡng ADX entry", group=group_adx, minval=1, step=0.5)
+use_di_filter = input.bool(true, "Lọc DI+ / DI-", group=group_adx)
+
+// ---------------------- 09. CANDLE PATTERN ----------------------
+group_candle = "09. Candle Pattern"
+use_engulfing = input.bool(true, "Dùng Engulfing", group=group_candle)
+use_pinbar = input.bool(true, "Dùng Hammer / Shooting Star", group=group_candle)
+wick_body_ratio = input.float(1.8, "Tỷ lệ râu / thân tối thiểu", group=group_candle, minval=1.0, step=0.1)
+max_opposite_wick_ratio = input.float(0.7, "Râu ngược tối đa so với thân", group=group_candle, minval=0.0, step=0.1)
+use_big_candle_filter = input.bool(true, "Không vào nếu nến tín hiệu quá lớn", group=group_candle)
+max_signal_candle_atr = input.float(2.5, "Range nến tín hiệu tối đa theo ATR", group=group_candle, minval=0.5, step=0.1)
+use_min_body_filter = input.bool(true, "Lọc nến có body quá nhỏ (doji)", group=group_candle)
+min_body_atr = input.float(0.05, "Body tối thiểu theo ATR", group=group_candle, minval=0.0, step=0.01)
+
+// ---------------------- 10. PULLBACK / EXTENSION ----------------------
+group_pb = "10. Pullback / Extension"
+use_pullback_filter = input.bool(true, "Chỉ lấy tín hiệu gần EMA", group=group_pb)
+pullback_atr_mult = input.float(2.7, "Pullback tối đa tới EMA chậm theo ATR", group=group_pb, minval=0.1, step=0.1)
+use_max_extension_filter = input.bool(true, "Không vào nếu giá quá xa EMA", group=group_pb)
+max_extension_atr = input.float(3.8, "Max extension theo ATR", group=group_pb, minval=0.5, step=0.1)
+use_strict_extension = input.bool(true, "Strict extension khi Regime Score thấp", group=group_pb)
+strict_extension_atr = input.float(3.6, "Strict extension ATR", group=group_pb, minval=0.5, step=0.1)
+
+// ---------------------- 11. REGIME SCORE ----------------------
+group_regime = "11. Regime Score"
+use_regime_score = input.bool(true, "Bật Regime Score mềm", group=group_regime)
+regime_tf = input.timeframe("240", "Regime TF", group=group_regime)
+regime_adx_len = input.int(14, "Regime ADX length", group=group_regime, minval=1)
+regime_adx_smoothing = input.int(14, "Regime ADX smoothing", group=group_regime, minval=1)
+regime_adx_threshold = input.float(14, "Regime ADX threshold", group=group_regime, minval=1, step=0.5)
+min_regime_score = input.int(2, "Regime Score tối thiểu", group=group_regime, minval=0, maxval=4)
+use_daily_ema_score = input.bool(true, "Daily EMA tính vào score", group=group_regime)
+daily_ema_len = input.int(200, "Daily EMA length", group=group_regime, minval=1)
+use_daily_ema_hard_filter = input.bool(false, "Ép cứng: Long chỉ khi trên Daily EMA", group=group_regime)
+use_atr_score = input.bool(true, "ATR State tính vào score", group=group_regime)
+atr_state_len = input.int(100, "ATR trung bình length", group=group_regime, minval=5)
+min_atr_state_ratio = input.float(0.70, "ATR hiện tại / ATR TB tối thiểu", group=group_regime, minval=0.1, step=0.05)
+
+// ---------------------- 12. VOLUME / RANGE ----------------------
+group_vol = "12. Volume / Range Filter"
+use_volume_filter = input.bool(false, "Bật lọc volume", group=group_vol)
+vol_len = input.int(20, "Volume MA length", group=group_vol, minval=1)
+min_vol_ratio = input.float(0.6, "Volume tối thiểu / MA", group=group_vol, minval=0.1, step=0.1)
+use_range_filter = input.bool(false, "Bật lọc range nến", group=group_vol)
+max_range_atr = input.float(2.5, "Max range nến theo ATR", group=group_vol, minval=0.5, step=0.1)
+
+// ---------------------- 13. RISK / EXIT ----------------------
+group_risk = "13. Risk / Exit"
+atr_len = input.int(14, "ATR length", group=group_risk, minval=1)
+sl_atr_mult = input.float(1.0, "Initial SL theo ATR", group=group_risk, minval=0.1, step=0.05)
+rr_ratio = input.float(2.15, "Take Profit RR", group=group_risk, minval=0.5, step=0.05)
+use_trailing = input.bool(true, "Bật ATR trailing stop", group=group_risk)
+trail_atr_mult = input.float(3.6, "Trailing ATR multiplier", group=group_risk, minval=0.5, step=0.1)
+trail_trigger_r = input.float(1.65, "Chỉ trailing sau khi đạt R", group=group_risk, minval=0.1, step=0.05)
+use_breakeven = input.bool(false, "Bật breakeven", group=group_risk)
+breakeven_trigger_r = input.float(1.5, "Breakeven trigger R", group=group_risk, minval=0.1, step=0.05)
+breakeven_offset_r = input.float(0.05, "Breakeven offset R", group=group_risk, minval=0.0, step=0.01)
+use_time_stop = input.bool(false, "Bật time stop", group=group_risk)
+time_stop_bars = input.int(220, "Time stop bars", group=group_risk, minval=1)
+
+// ---------------------- 14. ENTRY QUALITY — ATR EXPANSION ----------------------
+// [F1] ATR Expansion: chỉ vào khi volatility hiện tại ≥ ATR trung bình × factor.
+// Đây là filter chất lượng entry chính của v23.5 (PF 1.82→2.62, DD −48% ở v23.4).
+group_eq = "14. Entry Quality — ATR Expansion"
+use_atr_expansion = input.bool(true, "[F1] ATR Expansion: ATR ≥ ATR trung bình × hệ số",
+     group=group_eq,
+     tooltip="atr_val >= atr_avg * atr_exp_factor. Chỉ vào khi volatility đang ≥ trung bình → tránh entry trong low-vol compression. Mặc định BẬT trong v23.5. ATR trung bình dùng atr_state_len (group 11).")
+atr_exp_factor = input.float(1.00, "ATR Expansion factor (× ATR avg)", group=group_eq, minval=0.5, step=0.05,
+     tooltip="1.00 = ATR phải ≥ ATR trung bình. THẤP hơn (0.7-0.9) = lỏng hơn = nhiều lệnh hơn. CAO hơn (1.1) = gắt hơn = ít lệnh, chất lượng cao hơn. Dùng preset 'V23.5 ATR fX' để sweep.")
+
+// ---------------------- 15. DISPLAY ----------------------
+group_disp = "15. Display / Debug"
+show_bg = input.bool(true, "Màu nền xu hướng", group=group_disp)
+show_table = input.bool(true, "Bảng debug", group=group_disp)
+show_shapes = input.bool(true, "Hiển thị tín hiệu", group=group_disp)
+show_block_markers = input.bool(false, "Marker filter cơ bản bị chặn", group=group_disp)
+show_eq_markers = input.bool(true, "Marker ATR Expansion chặn entry", group=group_disp,
+     tooltip="Hiện marker khi có tín hiệu cơ bản nhưng bị ATR Expansion chặn. Giúp đếm bao nhiêu entry bị lọc.")
+show_session_badge = input.bool(true, "Badge phiên trên chart", group=group_disp)
+
+// ============================================================================
+// PRESET OVERRIDES
+// ============================================================================
+is_v235 = str.startswith(preset, "V23.5")
+is_v231_bench = preset == "V23.1 Strict Bench (no ATR)"
+is_any_package = is_v235 or is_v231_bench
+
+// Base package — chung cho tất cả preset trừ Custom
+if is_any_package
+    trade_direction := "Long Only"
+    use_risk_sizing := true
+    risk_per_trade_pct := 0.25
+    max_qty_cap := 10
+    min_regime_score := 3
+    use_strict_extension := true
+    strict_extension_atr := 3.0
+    use_session_filter := false
+    use_volume_filter := false
+    use_range_filter := false
+    max_daily_loss_pct := 0.75
+    max_drawdown_pct := 5.0
+    dd_reset_mode := "Hàng tháng"
+    use_breakeven := false
+    use_time_stop := false
+    rr_ratio := 3.2
+    use_trailing := true
+    trail_trigger_r := 2.6
+    trail_atr_mult := 5.5
+    // Strict entry (chung cho mọi package — bản tốt nhất đã đo)
+    adx_threshold := 22.0
+    pullback_atr_mult := 2.3
+    min_body_atr := 0.10
+    // [F1] ATR Expansion ON mặc định, factor 0.9 = Final (điểm cân bằng tốt nhất từ sweep v23.5)
+    use_atr_expansion := true
+    atr_exp_factor := 0.90
+
+// [F5] Sweep atr_exp_factor — mỗi preset 1 hệ số
+if preset == "V23.5 ATR f0.70"
+    atr_exp_factor := 0.70
+if preset == "V23.5 ATR f0.80"
+    atr_exp_factor := 0.80
+if preset == "V23.5 ATR f1.00"
+    atr_exp_factor := 1.00
+if preset == "V23.5 ATR f1.10"
+    atr_exp_factor := 1.10
+
+// V23.1 Strict Bench: ATR Expansion OFF = baseline $873 / PF 1.82 để A/B
+if is_v231_bench
+    use_atr_expansion := false
+
+session_allowed := not use_session_filter or (in_london or in_ny)
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+atr_val = ta.atr(atr_len)
+atr_avg = ta.sma(atr_val, atr_state_len)
+atr_ratio = atr_avg > 0 ? atr_val / atr_avg : 1.0
+
+[plus_di, minus_di, adx_val] = ta.dmi(adx_len, adx_smoothing)
+
+f_confirmed_dmi(_len, _smooth) =>
+    [p, m, a] = ta.dmi(_len, _smooth)
+    [p[1], m[1], a[1]]
+
+htf_ema = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htf_ema_len)[1], barmerge.gaps_off, barmerge.lookahead_off)
+daily_ema = request.security(syminfo.tickerid, "D", ta.ema(close, daily_ema_len)[1], barmerge.gaps_off, barmerge.lookahead_off)
+[regime_plus_di, regime_minus_di, regime_adx] = request.security(syminfo.tickerid, regime_tf, f_confirmed_dmi(regime_adx_len, regime_adx_smoothing), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Trend
+ema_slope_up = ema_fast > ema_fast[slope_lookback] and ema_slow >= ema_slow[slope_lookback]
+ema_slope_down = ema_fast < ema_fast[slope_lookback] and ema_slow <= ema_slow[slope_lookback]
+trend_up = ema_fast > ema_slow and (not use_ema_slope or ema_slope_up)
+trend_down = ema_fast < ema_slow and (not use_ema_slope or ema_slope_down)
+
+htf_up_ok = not use_htf_filter or close > htf_ema
+htf_down_ok = not use_htf_filter or close < htf_ema
+adx_ok = adx_val >= adx_threshold
+di_buy_ok = not use_di_filter or plus_di > minus_di
+di_sell_ok = not use_di_filter or minus_di > plus_di
+ema_distance_atr = atr_val > 0 ? math.abs(close - ema_slow) / atr_val : 0.0
+pullback_ok = not use_pullback_filter or ema_distance_atr <= pullback_atr_mult
+extension_ok = not use_max_extension_filter or ema_distance_atr <= max_extension_atr
+
+// Candle
+body = math.abs(close - open)
+body_atr = atr_val > 0 ? body / atr_val : 0.0
+real_body = math.max(body, syminfo.mintick * 10)
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+signal_range_atr = atr_val > 0 ? (high - low) / atr_val : 0.0
+big_candle_ok = not use_big_candle_filter or signal_range_atr <= max_signal_candle_atr
+min_body_ok = not use_min_body_filter or body_atr >= min_body_atr
+
+prev_bear = close[1] < open[1]
+prev_bull = close[1] > open[1]
+curr_bull = close > open
+curr_bear = close < open
+bullish_engulfing = curr_bull and prev_bear and open <= close[1] and close >= open[1]
+bearish_engulfing = curr_bear and prev_bull and open >= close[1] and close <= open[1]
+hammer = curr_bull and lower_wick >= wick_body_ratio * real_body and upper_wick <= max_opposite_wick_ratio * real_body
+shooting_star = curr_bear and upper_wick >= wick_body_ratio * real_body and lower_wick <= max_opposite_wick_ratio * real_body
+bullish_pattern = (use_engulfing and bullish_engulfing) or (use_pinbar and hammer)
+bearish_pattern = (use_engulfing and bearish_engulfing) or (use_pinbar and shooting_star)
+
+// Regime Score — component tắt = PASS
+score_daily_long = not use_daily_ema_score ? 1 : close > daily_ema ? 1 : 0
+score_daily_short = not use_daily_ema_score ? 1 : close < daily_ema ? 1 : 0
+score_dmi_long = regime_plus_di > regime_minus_di ? 1 : 0
+score_dmi_short = regime_minus_di > regime_plus_di ? 1 : 0
+score_adx_r = regime_adx >= regime_adx_threshold ? 1 : 0
+score_atr = not use_atr_score ? 1 : atr_ratio >= min_atr_state_ratio ? 1 : 0
+regime_score_long = score_daily_long + score_dmi_long + score_adx_r + score_atr
+regime_score_short = score_daily_short + score_dmi_short + score_adx_r + score_atr
+regime_long_ok = not use_regime_score or regime_score_long >= min_regime_score
+regime_short_ok = not use_regime_score or regime_score_short >= min_regime_score
+daily_hard_long_ok = not use_daily_ema_hard_filter or close > daily_ema
+daily_hard_short_ok = not use_daily_ema_hard_filter or close < daily_ema
+strict_extension_ok_long = not use_strict_extension or regime_score_long > min_regime_score or ema_distance_atr <= strict_extension_atr
+strict_extension_ok_short = not use_strict_extension or regime_score_short > min_regime_score or ema_distance_atr <= strict_extension_atr
+
+vol_avg = ta.sma(volume, vol_len)
+vol_ratio = vol_avg > 0 ? volume / vol_avg : 1.0
+volume_ok = not use_volume_filter or vol_ratio >= min_vol_ratio
+range_ok = not use_range_filter or signal_range_atr <= max_range_atr
+
+// [F1] ATR Expansion: ATR hiện tại ≥ ATR avg × factor — filter chất lượng chính v23.5
+atr_expansion_ok = not use_atr_expansion or (atr_avg > 0 and atr_val >= atr_avg * atr_exp_factor)
+
+// ============================================================================
+// RISK GUARDS
+// ============================================================================
+var float day_start_equity = na
+var float daily_pnl_pct = 0.0
+is_new_day = ta.change(time("D")) != 0
+if na(day_start_equity) or is_new_day
+    day_start_equity := strategy.equity
+daily_pnl_pct := day_start_equity > 0 ? (strategy.equity - day_start_equity) / day_start_equity * 100.0 : 0.0
+daily_loss_breached = use_max_daily_loss and daily_pnl_pct <= -max_daily_loss_pct
+
+var float peak_equity = na
+is_new_month = ta.change(time("M")) != 0
+if na(peak_equity) or (dd_reset_mode == "Hàng tháng" and is_new_month)
+    peak_equity := strategy.equity
+else
+    peak_equity := math.max(peak_equity, strategy.equity)
+current_dd_pct = peak_equity > 0 ? (strategy.equity - peak_equity) / peak_equity * 100.0 : 0.0
+dd_breached = use_max_drawdown and current_dd_pct <= -max_drawdown_pct
+
+var int last_loss_bar = na
+new_closed_trade = strategy.closedtrades > nz(strategy.closedtrades[1])
+last_trade_loss = strategy.closedtrades > 0 and new_closed_trade and strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+if last_trade_loss
+    last_loss_bar := bar_index
+bars_since_loss = na(last_loss_bar) ? 9999 : bar_index - last_loss_bar
+in_cooldown = use_cooldown and not na(last_loss_bar) and bars_since_loss < cooldown_bars
+
+can_long = (trade_direction == "Long Only" or trade_direction == "Both")
+can_short = (trade_direction == "Short Only" or trade_direction == "Both")
+bar_ok = not confirm_on_close or barstate.isconfirmed
+risk_guards_ok = not daily_loss_breached and not dd_breached and not in_cooldown and session_allowed and not no_friday_hold
+
+// ============================================================================
+// SIGNALS — strict entry + ATR Expansion
+// ============================================================================
+raw_buy  = trend_up   and htf_up_ok   and adx_ok and di_buy_ok  and pullback_ok and extension_ok and strict_extension_ok_long  and big_candle_ok and min_body_ok and volume_ok and range_ok and bullish_pattern and regime_long_ok  and daily_hard_long_ok  and atr_expansion_ok
+raw_sell = trend_down and htf_down_ok and adx_ok and di_sell_ok and pullback_ok and extension_ok and strict_extension_ok_short and big_candle_ok and min_body_ok and volume_ok and range_ok and bearish_pattern and regime_short_ok and daily_hard_short_ok and atr_expansion_ok
+
+buy_signal  = in_date_range and bar_ok and can_long  and risk_guards_ok and raw_buy
+sell_signal = in_date_range and bar_ok and can_short and risk_guards_ok and raw_sell
+
+// ============================================================================
+// POSITION STATE
+// ============================================================================
+var float entry_price = na
+var float entry_risk = na
+var float entry_sl = na
+var float entry_tp = na
+var float entry_atr = na
+var int entry_bar = na
+var float highest_since_entry = na
+var float lowest_since_entry = na
+var bool exit_called_this_bar = false
+var float best_long_stop = na
+var float best_short_stop = na
+
+new_long  = buy_signal  and strategy.position_size <= 0
+new_short = sell_signal and strategy.position_size >= 0
+
+risk_candidate    = sl_atr_mult * atr_val
+long_sl_candidate = close - risk_candidate
+long_tp_candidate = close + rr_ratio * risk_candidate
+short_sl_candidate = close + risk_candidate
+short_tp_candidate = close - rr_ratio * risk_candidate
+
+calc_qty_from_risk(float risk_amt) =>
+    sl_dist = sl_atr_mult * atr_val
+    pv = syminfo.pointvalue
+    sl_dist > 0 and pv > 0 ? risk_amt / (sl_dist * pv) : 1.0
+
+risk_amt  = strategy.equity * risk_per_trade_pct / 100.0
+trade_qty = use_risk_sizing ? math.min(calc_qty_from_risk(risk_amt), max_qty_cap) : fixed_qty_value
+
+if new_long and risk_candidate > 0
+    strategy.close("Short", comment="Close Short on Buy")
+    entry_price := close
+    entry_sl := long_sl_candidate
+    entry_risk := risk_candidate
+    entry_tp := long_tp_candidate
+    entry_atr := atr_val
+    entry_bar := bar_index
+    highest_since_entry := high
+    lowest_since_entry := low
+    best_long_stop := na
+    best_short_stop := na
+    strategy.entry("Long", strategy.long, qty=trade_qty, comment="BUY v23.5 H1")
+    strategy.exit("Long Exit", from_entry="Long", stop=long_sl_candidate, limit=long_tp_candidate, comment="Long Exit")
+
+if new_short and risk_candidate > 0
+    strategy.close("Long", comment="Close Long on Sell")
+    entry_price := close
+    entry_sl := short_sl_candidate
+    entry_risk := risk_candidate
+    entry_tp := short_tp_candidate
+    entry_atr := atr_val
+    entry_bar := bar_index
+    highest_since_entry := high
+    lowest_since_entry := low
+    best_long_stop := na
+    best_short_stop := na
+    strategy.entry("Short", strategy.short, qty=trade_qty, comment="SELL v23.5 H1")
+    strategy.exit("Short Exit", from_entry="Short", stop=short_sl_candidate, limit=short_tp_candidate, comment="Short Exit")
+
+just_acted = new_long or new_short
+in_long  = strategy.position_size > 0 and not just_acted
+in_short = strategy.position_size < 0 and not just_acted
+in_trade = in_long or in_short
+bars_in_trade = in_trade and not na(entry_bar) ? bar_index - entry_bar : 0
+
+if in_trade
+    highest_since_entry := na(highest_since_entry) ? high : math.max(highest_since_entry, high)
+    lowest_since_entry  := na(lowest_since_entry)  ? low  : math.min(lowest_since_entry,  low)
+
+current_r = 0.0
+if in_long  and not na(entry_price) and entry_risk > 0
+    current_r := (close - entry_price) / entry_risk
+if in_short and not na(entry_price) and entry_risk > 0
+    current_r := (entry_price - close) / entry_risk
+
+is_new_bar = ta.change(time) != 0
+if is_new_bar
+    exit_called_this_bar := false
+
+// ============================================================================
+// EXIT MANAGEMENT (ratchet trailing)
+// ============================================================================
+if in_long and entry_risk > 0
+    long_stop = entry_sl
+    if use_breakeven and current_r >= breakeven_trigger_r
+        long_stop := math.max(long_stop, entry_price + breakeven_offset_r * entry_risk)
+    if use_trailing and current_r >= trail_trigger_r
+        long_stop := math.max(long_stop, nz(highest_since_entry, high) - trail_atr_mult * atr_val)
+    best_long_stop := na(best_long_stop) ? long_stop : math.max(best_long_stop, long_stop)
+    strategy.exit("Long Exit", from_entry="Long", stop=best_long_stop, limit=entry_tp, comment="Long Exit")
+
+if in_short and entry_risk > 0
+    short_stop = entry_sl
+    if use_breakeven and current_r >= breakeven_trigger_r
+        short_stop := math.min(short_stop, entry_price - breakeven_offset_r * entry_risk)
+    if use_trailing and current_r >= trail_trigger_r
+        short_stop := math.min(short_stop, nz(lowest_since_entry, low) + trail_atr_mult * atr_val)
+    best_short_stop := na(best_short_stop) ? short_stop : math.min(best_short_stop, short_stop)
+    strategy.exit("Short Exit", from_entry="Short", stop=best_short_stop, limit=entry_tp, comment="Short Exit")
+
+if use_time_stop and in_trade and bars_in_trade >= time_stop_bars
+    strategy.close(in_long ? "Long" : "Short", comment="Time Stop")
+    exit_called_this_bar := true
+
+// Open profit (chỉ để hiển thị bảng debug)
+strategy_profit_now = in_trade ? strategy.openprofit : 0.0
+
+// Risk guard exits
+if daily_loss_breached and in_trade
+    strategy.close(in_long ? "Long" : "Short", comment="Daily Loss Limit")
+    exit_called_this_bar := true
+
+if dd_breached and in_trade
+    strategy.close(in_long ? "Long" : "Short", comment="DD Circuit Breaker")
+    exit_called_this_bar := true
+
+if no_friday_hold and in_trade
+    strategy.close(in_long ? "Long" : "Short", comment="Friday Close")
+    exit_called_this_bar := true
+
+// Reset state khi flat
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and not just_acted
+    entry_price := na
+    entry_sl := na
+    entry_risk := na
+    entry_tp := na
+    entry_atr := na
+    entry_bar := na
+    highest_since_entry := na
+    lowest_since_entry := na
+    best_long_stop := na
+    best_short_stop := na
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+plot(ema_fast, "EMA Fast", color=color.new(color.green, 0), linewidth=2)
+plot(ema_slow, "EMA Slow", color=color.new(color.red, 0), linewidth=2)
+plot(htf_ema, "HTF EMA", color=color.new(color.orange, 0), linewidth=1)
+plot(daily_ema, "Daily EMA", color=color.new(color.blue, 30), linewidth=1)
+
+bgcolor(show_bg ? (trend_up ? color.new(color.green, 91) : trend_down ? color.new(color.red, 91) : na) : na)
+
+plotshape(show_shapes and new_long,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), text="BUY",  textcolor=color.lime, size=size.small)
+plotshape(show_shapes and new_short, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  text="SELL", textcolor=color.red,  size=size.small)
+
+// Block markers — base filters
+base_bull_candidate = bullish_pattern and trend_up and min_body_ok
+plotshape(show_block_markers and base_bull_candidate and not regime_long_ok, title="Blk Regime", style=shape.circle, location=location.belowbar, color=color.new(color.orange, 0), text="RG", size=size.tiny)
+plotshape(show_block_markers and base_bull_candidate and regime_long_ok and not big_candle_ok, title="Blk BC", style=shape.circle, location=location.belowbar, color=color.new(color.gray, 0), text="BC", size=size.tiny)
+plotshape(show_block_markers and base_bull_candidate and regime_long_ok and big_candle_ok and not extension_ok, title="Blk Ext", style=shape.circle, location=location.belowbar, color=color.new(color.teal, 0), text="EX", size=size.tiny)
+
+// [F1] ATR Expansion block marker — entry cơ bản pass nhưng bị ATR Exp chặn
+base_passed = base_bull_candidate and regime_long_ok and big_candle_ok and extension_ok and adx_ok and di_buy_ok and pullback_ok and min_body_ok
+plotshape(show_eq_markers and base_passed and not atr_expansion_ok, title="ATR Exp Blk", style=shape.xcross, location=location.belowbar, color=color.new(color.maroon, 0), text="ATR", size=size.tiny)
+
+var table session_t = table.new(position.top_left, 1, 1, bgcolor=color.new(color.black, 60), border_width=0)
+if show_session_badge and barstate.islast
+    table.cell(session_t, 0, 0, in_london ? "LONDON" : in_ny ? "NEW YORK" : "OFF-HOURS",
+         text_color=in_london ? color.yellow : in_ny ? color.aqua : color.gray, text_size=size.large)
+
+// Hidden plots
+plot(regime_score_long,  "Regime Score Long",  display=display.none)
+plot(regime_score_short, "Regime Score Short", display=display.none)
+plot(daily_pnl_pct,  "Daily PnL %",   display=display.none)
+plot(current_dd_pct, "Current DD %",  display=display.none)
+plot(atr_expansion_ok ? 1.0 : 0.0, "ATR Exp Pass", display=display.none)
+plot(atr_ratio, "ATR Ratio (cur/avg)", display=display.none)
+plot(strategy_profit_now, "Open Profit", display=display.none)
+
+// ============================================================================
+// DEBUG TABLE
+// ============================================================================
+var table t = table.new(position.top_right, 2, 26,
+     bgcolor=color.new(color.black, 25), border_color=color.new(color.gray, 60), border_width=1)
+if show_table and barstate.islast
+    table.cell(t, 0, 0, "v23.5 ATR Quality", text_color=color.white, bgcolor=color.new(color.navy, 15))
+    table.cell(t, 1, 0, preset, text_color=color.white, bgcolor=color.new(color.navy, 15))
+
+    table.cell(t, 0, 1, "EMA Trend", text_color=color.white)
+    table.cell(t, 1, 1, trend_up ? "UP" : trend_down ? "DOWN" : "FLAT", text_color=trend_up ? color.lime : trend_down ? color.red : color.gray)
+
+    table.cell(t, 0, 2, "ADX / DI", text_color=color.white)
+    table.cell(t, 1, 2, str.tostring(math.round(adx_val, 1)) + " | +" + str.tostring(math.round(plus_di, 1)) + " -" + str.tostring(math.round(minus_di, 1)), text_color=adx_ok and di_buy_ok ? color.lime : color.gray)
+
+    table.cell(t, 0, 3, "Regime L/S", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(regime_score_long) + "/" + str.tostring(regime_score_short) + " (≥" + str.tostring(min_regime_score) + ")", text_color=regime_long_ok ? color.lime : color.red)
+
+    table.cell(t, 0, 4, "═ ATR Expansion (F1) ═", text_color=color.yellow, bgcolor=color.new(color.black, 60))
+    table.cell(t, 1, 4, use_atr_expansion ? ("ON ×" + str.tostring(atr_exp_factor)) : "OFF", text_color=use_atr_expansion ? color.yellow : color.gray, bgcolor=color.new(color.black, 60))
+
+    table.cell(t, 0, 5, "ATR cur / avg", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(math.round(atr_val, 2)) + " / " + str.tostring(math.round(atr_avg, 2)) + " (" + str.tostring(math.round(atr_ratio, 2)) + "×)", text_color=not use_atr_expansion ? color.gray : atr_expansion_ok ? color.lime : color.red)
+
+    table.cell(t, 0, 6, "═ Trade Status ═", text_color=color.aqua, bgcolor=color.new(color.black, 60))
+    table.cell(t, 1, 6, "", bgcolor=color.new(color.black, 60))
+
+    table.cell(t, 0, 7, "In Trade / Bars", text_color=color.white)
+    table.cell(t, 1, 7, (in_trade ? (in_long ? "LONG" : "SHORT") : "NO") + " / " + str.tostring(bars_in_trade), text_color=in_trade ? color.lime : color.gray)
+
+    table.cell(t, 0, 8, "Current R", text_color=color.white)
+    table.cell(t, 1, 8, str.tostring(math.round(current_r, 2)) + "R", text_color=current_r >= 0 ? color.lime : color.red)
+
+    table.cell(t, 0, 9, "Open Profit $", text_color=color.white)
+    table.cell(t, 1, 9, str.tostring(math.round(strategy_profit_now, 2)), text_color=strategy_profit_now >= 0 ? color.lime : color.red)
+
+    table.cell(t, 0, 10, "Active Stop", text_color=color.white)
+    act_stop = in_long ? nz(best_long_stop) : in_short ? nz(best_short_stop) : na
+    table.cell(t, 1, 10, na(act_stop) ? "na" : str.tostring(math.round(act_stop, 2)), text_color=color.orange)
+
+    table.cell(t, 0, 11, "═ Risk Guards ═", text_color=color.aqua, bgcolor=color.new(color.black, 60))
+    table.cell(t, 1, 11, "", bgcolor=color.new(color.black, 60))
+
+    table.cell(t, 0, 12, "Daily PnL%", text_color=color.white)
+    table.cell(t, 1, 12, str.tostring(math.round(daily_pnl_pct, 2)) + "%", text_color=daily_loss_breached ? color.red : daily_pnl_pct >= 0 ? color.lime : color.orange)
+
+    table.cell(t, 0, 13, "Drawdown%", text_color=color.white)
+    table.cell(t, 1, 13, str.tostring(math.round(current_dd_pct, 2)) + "%", text_color=dd_breached ? color.red : color.yellow)
+
+    table.cell(t, 0, 14, "Risk Status", text_color=color.white)
+    table.cell(t, 1, 14, daily_loss_breached ? "DAILY-LOSS" : dd_breached ? "DD-BREACH" : in_cooldown ? "COOLDOWN" : no_friday_hold ? "FRI-CLOSE" : "OK", text_color=daily_loss_breached or dd_breached ? color.red : in_cooldown or no_friday_hold ? color.orange : color.lime)
+
+    table.cell(t, 0, 15, "═ System Stats ═", text_color=color.aqua, bgcolor=color.new(color.black, 60))
+    table.cell(t, 1, 15, "", bgcolor=color.new(color.black, 60))
+
+    table.cell(t, 0, 16, "Closed Trades", text_color=color.white)
+    table.cell(t, 1, 16, str.tostring(strategy.closedtrades) + " | W=" + str.tostring(strategy.wintrades) + " L=" + str.tostring(strategy.losstrades), text_color=strategy.closedtrades >= 30 ? color.lime : color.orange)
+
+    table.cell(t, 0, 17, "Win Rate", text_color=color.white)
+    float wr = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : na
+    table.cell(t, 1, 17, na(wr) ? "N/A" : str.tostring(math.round(wr, 1)) + "%", text_color=na(wr) ? color.gray : wr >= 45 ? color.lime : wr >= 38 ? color.orange : color.red)
+
+    table.cell(t, 0, 18, "Profit Factor", text_color=color.white)
+    float pf = math.abs(strategy.grossloss) > 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+    table.cell(t, 1, 18, na(pf) ? "N/A" : str.tostring(math.round(pf, 3)), text_color=na(pf) ? color.gray : pf >= 1.7 ? color.lime : pf >= 1.3 ? color.orange : color.red)
+
+    table.cell(t, 0, 19, "Net Profit", text_color=color.white)
+    table.cell(t, 1, 19, str.tostring(math.round(strategy.netprofit, 2)) + "$ (" + str.tostring(math.round(strategy.netprofit / strategy.initial_capital * 100.0, 2)) + "%)", text_color=strategy.netprofit >= 0 ? color.lime : color.red)
+
+    table.cell(t, 0, 20, "Entry Config", text_color=color.white)
+    table.cell(t, 1, 20, "ADX" + str.tostring(adx_threshold) + " PB" + str.tostring(pullback_atr_mult) + " B" + str.tostring(min_body_atr), text_color=color.white)
+
+    table.cell(t, 0, 21, "Trail", text_color=color.white)
+    table.cell(t, 1, 21, use_trailing ? str.tostring(trail_trigger_r) + "R / " + str.tostring(trail_atr_mult) + "×ATR" : "OFF", text_color=use_trailing ? color.lime : color.gray)
+
+    table.cell(t, 0, 22, "Symbol / TF", text_color=color.white)
+    table.cell(t, 1, 22, syminfo.ticker + " / " + timeframe.period, text_color=color.white)
+
+    table.cell(t, 0, 23, "EMA Dist ATR", text_color=color.white)
+    table.cell(t, 1, 23, str.tostring(math.round(ema_distance_atr, 2)), text_color=pullback_ok and extension_ok ? color.lime : color.orange)
+
+    table.cell(t, 0, 24, "Candle Range/Body", text_color=color.white)
+    table.cell(t, 1, 24, str.tostring(math.round(signal_range_atr, 2)) + " / " + str.tostring(math.round(body_atr, 3)), text_color=big_candle_ok and min_body_ok ? color.lime : color.orange)
+
+    table.cell(t, 0, 25, "v23.5 design", text_color=color.white)
+    table.cell(t, 1, 25, "CGB removed | ATR Exp " + (use_atr_expansion ? "ON" : "OFF"), text_color=color.aqua)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+if new_long
+    alert("CNX v23.5 BUY " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Regime=" + str.tostring(regime_score_long) + "/4" +
+          " | ATRx=" + str.tostring(math.round(atr_ratio, 2)) +
+          " | Qty=" + str.tostring(math.round(trade_qty, 2)),
+          alert.freq_once_per_bar_close)
+
+if new_short
+    alert("CNX v23.5 SELL " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Regime=" + str.tostring(regime_score_short) + "/4" +
+          " | Qty=" + str.tostring(math.round(trade_qty, 2)),
+          alert.freq_once_per_bar_close)
+
+if exit_called_this_bar
+    alert("CNX v23.5 Exit " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | R=" + str.tostring(math.round(current_r, 2)) +
+          " | Reason=" + (daily_loss_breached ? "DAILY-LOSS" : dd_breached ? "DD-BREAK" : no_friday_hold ? "FRIDAY" : "SL/TP/TRAIL"),
+          alert.freq_once_per_bar_close)
