@@ -1,0 +1,187 @@
+//@version=6
+// Ve_QM_QB_OB_GAP — Vẽ vùng Quá mua / Quá bán (RSI), vùng Gap, và Order Block (OB)
+indicator("Ve_QM_QB_OB_GAP", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ===================== Inputs =====================
+grpQM = "Quá mua / Quá bán (RSI)"
+showRSI  = input.bool(true, "Bật vùng quá mua/quá bán", group=grpQM)
+rsiLen   = input.int(14, "Chu kỳ RSI", minval=1, group=grpQM)
+obLevel  = input.float(70, "Ngưỡng quá mua",  minval=50, maxval=100, group=grpQM)
+osLevel  = input.float(30, "Ngưỡng quá bán",  minval=0,  maxval=50,  group=grpQM)
+qmCol    = input.color(color.red,  "Màu vùng quá mua",  group=grpQM)
+qbCol    = input.color(color.lime, "Màu vùng quá bán",  group=grpQM)
+
+grpGap = "Vùng Gap (khoảng trống giá)"
+showGap   = input.bool(true, "Bật vùng gap", group=grpGap)
+minGapPct = input.float(0.15, "Kích thước gap tối thiểu (% giá)", minval=0.0, step=0.01, group=grpGap) / 100.0
+gapUpCol  = input.color(color.aqua,    "Màu gap tăng (hỗ trợ)",   group=grpGap)
+gapDnCol  = input.color(color.fuchsia, "Màu gap giảm (kháng cự)", group=grpGap)
+
+grpOB = "Order Block (OB)"
+showOB     = input.bool(true, "Bật vùng OB", group=grpOB)
+obLookback = input.int(5, "Số nến đo cú đẩy", minval=2, maxval=50, group=grpOB)
+obMovePct  = input.float(0.5, "Biên độ cú đẩy tối thiểu (% giá)", minval=0.05, step=0.05, group=grpOB) / 100.0
+obBullCol  = input.color(color.teal,   "Màu OB tăng (demand)",  group=grpOB)
+obBearCol  = input.color(color.maroon, "Màu OB giảm (supply)",  group=grpOB)
+
+grpStyle = "Hiển thị"
+showText = input.bool(true, "Hiện nhãn loại vùng", group=grpStyle)
+dimTransp = input.int(82, "Độ mờ nền vùng (0–100)", minval=0, maxval=100, group=grpStyle)
+
+grpAlert = "Cảnh báo (Alert)"
+alertOn = input.bool(true, "Bật cảnh báo khi giá lấp gap / chạm OB", group=grpAlert)
+
+f_px(x) => str.tostring(x, format.mintick)
+
+// ===================== Trạng thái =====================
+// Gap đang mở (chưa lấp)
+var array<box>   gapBox = array.new<box>()
+var array<float> gapTop = array.new<float>()
+var array<float> gapBot = array.new<float>()
+var array<bool>  gapUp  = array.new<bool>()
+// OB đang mở (chưa bị chạm)
+var array<box>   obBox  = array.new<box>()
+var array<float> obTop  = array.new<float>()
+var array<float> obBot  = array.new<float>()
+var array<bool>  obBull = array.new<bool>()
+
+bool touched = false
+string msg = ""
+
+// ===================== 1) Vùng Quá mua / Quá bán (RSI) =====================
+// Tính toàn cục (chạy mọi nến) để tham chiếu lịch sử nhất quán
+rsi  = ta.rsi(close, rsiLen)
+qmUp = ta.crossover(rsi, obLevel)
+qmDn = ta.crossunder(rsi, obLevel)
+qbDn = ta.crossunder(rsi, osLevel)
+qbUp = ta.crossover(rsi, osLevel)
+// Cú đẩy giá cho OB
+obBase  = bar_index > obLookback ? close[obLookback] : na
+upImp   = not na(obBase) and (close - obBase) / obBase >= obMovePct
+downImp = not na(obBase) and (obBase - close) / obBase >= obMovePct
+
+var bool  inQM = false
+var int   qmL  = na
+var float qmH  = na
+var float qmLo = na
+var bool  inQB = false
+var int   qbL  = na
+var float qbH  = na
+var float qbLo = na
+
+if showRSI
+    // --- Quá mua: RSI vượt lên ngưỡng quá mua ---
+    if qmUp
+        inQM := true
+        qmL  := bar_index
+        qmH  := high
+        qmLo := low
+    if inQM
+        qmH  := math.max(qmH, high)
+        qmLo := math.min(qmLo, low)
+    if inQM and qmDn
+        inQM := false
+        box.new(qmL, qmH, bar_index, qmLo, border_color=qmCol, border_width=1, border_style=line.style_dotted, bgcolor=color.new(qmCol, dimTransp), text=showText ? "Quá mua" : "", text_color=qmCol, text_size=size.small, text_halign=text.align_left, text_valign=text.align_top)
+    // --- Quá bán: RSI rơi xuống ngưỡng quá bán ---
+    if qbDn
+        inQB := true
+        qbL  := bar_index
+        qbH  := high
+        qbLo := low
+    if inQB
+        qbH  := math.max(qbH, high)
+        qbLo := math.min(qbLo, low)
+    if inQB and qbUp
+        inQB := false
+        box.new(qbL, qbH, bar_index, qbLo, border_color=qbCol, border_width=1, border_style=line.style_dotted, bgcolor=color.new(qbCol, dimTransp), text=showText ? "Quá bán" : "", text_color=qbCol, text_size=size.small, text_halign=text.align_left, text_valign=text.align_bottom)
+
+// ===================== 2) Vùng Gap =====================
+// Lấp gap trước (vùng đang mở), rồi mới phát hiện gap mới của nến hiện tại
+if showGap and array.size(gapBox) > 0
+    for i = array.size(gapBox) - 1 to 0
+        b   = array.get(gapBox, i)
+        top = array.get(gapTop, i)
+        bot = array.get(gapBot, i)
+        up  = array.get(gapUp, i)
+        filled = up ? (low <= bot) : (high >= top)   // chạm mép xa = lấp đầy
+        if filled
+            box.set_right(b, bar_index)
+            box.set_extend(b, extend.none)
+            box.set_bgcolor(b, color.new(color.gray, 90))
+            box.set_border_color(b, color.new(color.gray, 40))
+            array.remove(gapBox, i)
+            array.remove(gapTop, i)
+            array.remove(gapBot, i)
+            array.remove(gapUp, i)
+            touched := true
+            msg := "Ve_QM_QB_OB_GAP: gia " + f_px(close) + " da lap gap " + f_px(bot) + "-" + f_px(top)
+
+if showGap and bar_index > 0
+    bool gUp = low > high[1]
+    bool gDn = high < low[1]
+    float gT = gUp ? low : (gDn ? low[1] : na)
+    float gB = gUp ? high[1] : (gDn ? high : na)
+    if (gUp or gDn) and not na(gT) and not na(gB) and (gT - gB) >= close * minGapPct
+        col = gUp ? gapUpCol : gapDnCol
+        tag = gUp ? "Gap ▲" : "Gap ▼"
+        b = box.new(bar_index - 1, gT, bar_index, gB, border_color=col, border_width=1, bgcolor=color.new(col, dimTransp), extend=extend.right, text=showText ? tag : "", text_color=col, text_size=size.small, text_halign=text.align_right, text_valign=text.align_center)
+        array.push(gapBox, b)
+        array.push(gapTop, gT)
+        array.push(gapBot, gB)
+        array.push(gapUp, gUp)
+
+// ===================== 3) Order Block (OB) =====================
+// Chạm OB trước (vùng đang mở), rồi phát hiện OB mới sau cú đẩy
+if showOB and array.size(obBox) > 0
+    for i = array.size(obBox) - 1 to 0
+        b    = array.get(obBox, i)
+        top  = array.get(obTop, i)
+        bot  = array.get(obBot, i)
+        bull = array.get(obBull, i)
+        tap = bull ? (low <= top) : (high >= bot)   // giá quay lại chạm mép gần
+        if tap
+            box.set_right(b, bar_index)
+            box.set_extend(b, extend.none)
+            box.set_border_color(b, color.new(bull ? obBullCol : obBearCol, 30))
+            array.remove(obBox, i)
+            array.remove(obTop, i)
+            array.remove(obBot, i)
+            array.remove(obBull, i)
+            touched := true
+            msg := "Ve_QM_QB_OB_GAP: gia " + f_px(close) + " cham OB " + (bull ? "tang" : "giam") + " " + f_px(bot) + "-" + f_px(top)
+
+if showOB and bar_index > obLookback
+    // OB tăng (demand) = nến giảm gần nhất trước cú đẩy tăng
+    if upImp and not upImp[1]
+        int idx = -1
+        for j = 1 to obLookback
+            if idx == -1 and close[j] < open[j]
+                idx := j
+        if idx != -1
+            float t = high[idx]
+            float bt = low[idx]
+            b = box.new(bar_index - idx, t, bar_index, bt, border_color=obBullCol, border_width=2, bgcolor=color.new(obBullCol, dimTransp), extend=extend.right, text=showText ? "OB ▲" : "", text_color=obBullCol, text_size=size.small, text_halign=text.align_left, text_valign=text.align_center)
+            array.push(obBox, b)
+            array.push(obTop, t)
+            array.push(obBot, bt)
+            array.push(obBull, true)
+    // OB giảm (supply) = nến tăng gần nhất trước cú đẩy giảm
+    if downImp and not downImp[1]
+        int idx = -1
+        for j = 1 to obLookback
+            if idx == -1 and close[j] > open[j]
+                idx := j
+        if idx != -1
+            float t = high[idx]
+            float bt = low[idx]
+            b = box.new(bar_index - idx, t, bar_index, bt, border_color=obBearCol, border_width=2, bgcolor=color.new(obBearCol, dimTransp), extend=extend.right, text=showText ? "OB ▼" : "", text_color=obBearCol, text_size=size.small, text_halign=text.align_left, text_valign=text.align_center)
+            array.push(obBox, b)
+            array.push(obTop, t)
+            array.push(obBot, bt)
+            array.push(obBull, false)
+
+// ===================== Cảnh báo =====================
+bgcolor(touched ? color.new(color.yellow, 80) : na, title="Nhấp nháy khi lấp gap / chạm OB")
+if alertOn and touched
+    alert(msg, alert.freq_once_per_bar)
+alertcondition(touched, title="Lấp gap hoặc chạm OB", message="Ve_QM_QB_OB_GAP: gia vua lap mot gap hoac cham mot Order Block")

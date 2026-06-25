@@ -53,3 +53,41 @@ Phần **nhấp nháy** chạy tự động. Để có thêm **beep + popup**:
 
 - Indicator chỉ dùng dữ liệu của TradingView Desktop đang chạy trên máy bạn; không gửi dữ liệu ra ngoài.
 - Vùng được neo theo giá + thời gian nên hiển thị nhất quán trên mọi khung.
+
+---
+
+# Ve_QM_QB_OB_GAP — Quá mua / Quá bán + Gap + Order Block (Pine v6)
+
+Vẽ 4 loại vùng trên cùng một biểu đồ:
+
+> File: [`Ve_QM_QB_OB_GAP.pine`](./Ve_QM_QB_OB_GAP.pine)
+
+## Tính năng
+
+- **Quá mua / Quá bán (RSI)**: khi RSI vượt ngưỡng quá mua (mặc định 70) hoặc rơi dưới ngưỡng quá bán (30), đánh dấu **vùng giá** suốt giai đoạn đó bằng box viền chấm (đỏ = quá mua, xanh = quá bán).
+- **Gap**: phát hiện khoảng trống giá giữa 2 nến (`low > high[1]` = gap tăng/hỗ trợ; `high < low[1]` = gap giảm/kháng cự). Box **kéo dài sang phải** đến khi giá lấp đầy gap (chạm mép xa) thì dừng lại và chuyển xám.
+- **Order Block (OB)**: sau một **cú đẩy mạnh** (biên độ qua N nến ≥ ngưỡng %), lấy **nến đối nghịch gần nhất** làm OB — nến giảm cuối trước cú đẩy tăng = OB tăng (demand); nến tăng cuối trước cú đẩy giảm = OB giảm (supply). Box kéo dài sang phải đến khi giá quay lại **chạm mép gần** thì dừng.
+- **Cảnh báo**: nền nhấp nháy + `alert()` + `alertcondition()` khi giá **lấp một gap** hoặc **chạm một OB**.
+
+## Tham số (Inputs)
+
+| Nhóm | Tham số | Mặc định | Ý nghĩa |
+|------|---------|----------|---------|
+| Quá mua/bán (RSI) | Chu kỳ RSI | 14 | Độ dài RSI |
+| | Ngưỡng quá mua / quá bán | 70 / 30 | Mức kích hoạt vùng |
+| | Màu vùng quá mua / quá bán | đỏ / lime | Phân biệt loại |
+| Gap | Kích thước gap tối thiểu (%) | 0.15 | Bỏ qua gap quá nhỏ |
+| | Màu gap tăng / giảm | aqua / fuchsia | Hỗ trợ / kháng cự |
+| Order Block | Số nến đo cú đẩy | 5 | Cửa sổ đo biên độ |
+| | Biên độ cú đẩy tối thiểu (%) | 0.5 | Ngưỡng coi là "đẩy mạnh" |
+| | Màu OB tăng / giảm | teal / maroon | Demand / supply |
+| Hiển thị | Hiện nhãn loại vùng | true | Bật/tắt chữ trong box |
+| | Độ mờ nền vùng | 82 | 0 = đặc, 100 = trong suốt |
+| Cảnh báo | Bật cảnh báo | true | Lấp gap / chạm OB |
+
+## Thiết lập Alert
+
+1. **Create Alert** → ô **Condition** chọn **`Ve_QM_QB_OB_GAP`** → chọn **`Lấp gap hoặc chạm OB`**.
+2. Tab **Notifications** → bật **Play sound** → **Create**.
+
+> Mẹo chỉnh độ nhạy OB theo từng mã: tăng **Biên độ cú đẩy tối thiểu (%)** nếu có quá nhiều OB; giảm nếu quá ít. Mã biến động mạnh (crypto/futures) thường cần ngưỡng cao hơn cổ phiếu.
