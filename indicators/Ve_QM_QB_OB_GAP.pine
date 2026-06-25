@@ -181,7 +181,8 @@ if showOB and bar_index > obLookback
             array.push(obBull, false)
 
 // ===================== Cảnh báo =====================
-bgcolor(touched ? color.new(color.yellow, 80) : na, title="Nhấp nháy khi lấp gap / chạm OB")
+// Chỉ nhấp nháy ở nến cuối (realtime) để không che các nến lịch sử
+bgcolor(barstate.islast and touched ? color.new(color.yellow, 80) : na, title="Nhấp nháy khi lấp gap / chạm OB")
 if alertOn and touched
     alert(msg, alert.freq_once_per_bar)
 alertcondition(touched, title="Lấp gap hoặc chạm OB", message="Ve_QM_QB_OB_GAP: gia vua lap mot gap hoac cham mot Order Block")
