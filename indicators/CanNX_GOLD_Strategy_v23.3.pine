@@ -1,0 +1,909 @@
+// © mInvest / CanNX — v23.3 H1 Final Forward Test
+//@version=6
+strategy(title="CanNX - mInvest TC GOLD Strategy v23.3 H1 Final Forward Test",
+     shorttitle="CNX v23.3",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=5,
+     margin_long=10,
+     margin_short=10,
+     process_orders_on_close=true,
+     max_bars_back=5000)
+
+// ============================================================================
+// v23.2 — Cải tiến từ phân tích backtest v23.1 (FOREXCOM:XAUUSD, 2024–2026)
+//
+// PHÁT HIỆN v23.1:
+//  A) CGB trigger $80 CHƯA BAO GIỜ kích hoạt — avg winner $75–77, MFE close-bar
+//     thường dưới $80 dù intrabar MFE đôi khi vượt. Trigger hoàn toàn vô hiệu.
+//  B) 4/6 file kết quả giống hệt nhau → Strict preset (ADX 22, PB 2.3, Body 0.10)
+//     cho thấy V23 Final / Debug / V22.9 Strict Body đều cùng entry logic.
+//     Khi CGB không chạy, Final và Debug cho kết quả đồng nhất.
+//  C) Preset Loose (ADX 18) thêm 63 lệnh chỉ thu +$90 net nhưng tốn thêm $246
+//     commission và gần gấp đôi drawdown. Return/DD = 2.80 vs 4.74 của Strict.
+//  D) 51% lợi nhuận ròng của Loose bị ăn bởi commission.
+//  E) 2026 (forward): Loose đã âm (-$15), Strict và Intermediate vẫn dương.
+//
+// THAY ĐỔI v23.2 (dựa trực tiếp từ phát hiện trên):
+//  [C1] CGB trigger: đổi mặc định sang "R-multiple" trigger_r_mult=1.0
+//       → trigger tự động scale theo position size, không phụ thuộc tài khoản cố định.
+//       → 1.0R trigger ≈ $25 (risk sizing 0.25% trên $10K), thấp hơn avg winner $75–77 nên sẽ arm.
+//  [C2] CGB min_keep: thêm chế độ R-multiple, mặc định 0.30R
+//       → đảm bảo giữ lại ít nhất 0.3R sau khi CGB thoát.
+//  [C3] use_intrabar_mfe: đổi mặc định sang TRUE
+//       → bắt đỉnh lợi nhuận intrabar thay vì chỉ bar-close, giải quyết root cause
+//       khiến CGB không bao giờ arm mặc dù MFE đã vượt ngưỡng.
+//  [C4] Commission guard: CGB chỉ thoát nếu profit ≥ guard_mult × est_commission
+//       → tránh thoát lệnh khi lợi nhuận còn chưa đủ bù commission hai chiều.
+//  [C5] Thêm cgb_fired_count (persistent counter) → theo dõi CGB có thực sự chạy.
+//  [C6] Preset "V23.2 Final Forward Test" chuẩn hóa toàn bộ cải tiến C1–C5.
+//  [C7] Thêm "V23.1 Strict Benchmark" để A/B so sánh trực tiếp với phiên bản cũ.
+//  [C8] Xoá Loose config khỏi preset danh sách — không đủ hiệu quả theo data.
+//  Giữ nguyên tất cả fix từ v23.1: ratchet trailing, just_acted guard,
+//  max_bars_back, bgcolor fix, new_long/new_short cho plotshape/alert.
+//
+// THAY ĐỔI v23.3 (dựa trên review code v23.2):
+//  [D1] Code cleanup behavior-preserving: gộp biến trùng (risk_candidate,
+//       trade_qty, dùng entry_tp trực tiếp), bỏ range_atr lặp, bỏ
+//       max_lines/labels/boxes_count thừa. Shorttitle rút còn ≤10 ký tự.
+//  [D2] FIX dư âm CGB-không-arm: khi use_intrabar_mfe BẬT, trigger CGB nay
+//       dùng intrabar max profit (high/low × position value) thay vì chỉ
+//       close-bar dollar profit. Trước đây giveback% đã intrabar nhưng TRIGGER
+//       vẫn close-bar → nếu lãi chỉ vọt intrabar mà nến đóng dưới ngưỡng thì
+//       CGB không arm. Nay đồng bộ cả hai. Khi intrabar OFF (các benchmark)
+//       trigger giữ nguyên close-bar → benchmark KHÔNG đổi kết quả.
+//  [D3] Sửa tooltip/comment "1.0R ≈ $50" → "≈ $25" (risk sizing 0.25% giới hạn
+//       risk ≈ $25/lệnh, nên 1.0R thực tế ≈ $25, không phải $50).
+// LƯU Ý: [D2] LÀM THAY ĐỔI kết quả backtest của preset V23.2/V23.3 Final
+//        (intrabar ON). Dùng để A/B so sánh với v23.2.
+// ============================================================================
+
+// ---------------------- 01. PRESET / DIRECTION ----------------------
+group_main = "01. Preset / Direction"
+preset = input.string("V23.3 Final Forward Test", "Preset",
+     options=["V23.3 Final Forward Test", "V23.3 Debug Only",
+              "V23.2 Final Benchmark",
+              "V23.1 Strict Benchmark", "V22.9 Strict Body Benchmark",
+              "V22.8 RR3.2 Benchmark", "Custom"],
+     group=group_main,
+     tooltip="V23.3: ADX 22, PB 2.3, Body 0.10, RR 3.2, CGB 1.0R trigger / 0.30R keep / intrabar giveback+TRIGGER ON. V23.2 Final Benchmark: y hệt nhưng trigger close-bar (để A/B với v23.3). V23.1 Strict: bản cũ hơn.")
+trade_direction = input.string("Long Only", "Hướng giao dịch", options=["Long Only", "Short Only", "Both"], group=group_main)
+confirm_on_close = input.bool(true, "Chỉ xác nhận khi nến đóng", group=group_main)
+
+// ---------------------- 02. SESSION FILTER ----------------------
+group_sess = "02. Session Filter"
+use_session_filter = input.bool(false, "Bật lọc phiên giao dịch", group=group_sess)
+session_london = input.session("0800-1600", "London (Etc/UTC)", group=group_sess)
+session_ny = input.session("1300-2200", "New York (Etc/UTC)", group=group_sess)
+in_london = not na(time(timeframe.period, session_london, "Etc/UTC"))
+in_ny = not na(time(timeframe.period, session_ny, "Etc/UTC"))
+session_allowed = not use_session_filter or (in_london or in_ny)
+is_friday_utc = dayofweek(time, "Etc/UTC") == dayofweek.friday
+friday_close_hour_utc = input.int(20, "Đóng lệnh thứ 6 sau (UTC)", group=group_sess, minval=0, maxval=23)
+no_friday_hold = is_friday_utc and hour(time, "Etc/UTC") >= friday_close_hour_utc
+
+// ---------------------- 03. BACKTEST WINDOW ----------------------
+group_bt = "03. Backtest Window"
+use_date_filter = input.bool(true, "Bật giới hạn thời gian backtest", group=group_bt)
+start_time = input.time(timestamp("2020-01-01T00:00:00"), "Ngày bắt đầu", group=group_bt)
+end_time = input.time(timestamp("2027-01-01T00:00:00"), "Ngày kết thúc", group=group_bt)
+in_date_range = not use_date_filter or (time >= start_time and time <= end_time)
+
+// ---------------------- 04. RISK GUARDS ----------------------
+group_guard = "04. Risk Guards"
+use_max_daily_loss = input.bool(true, "Bật giới hạn lỗ trong ngày", group=group_guard)
+max_daily_loss_pct = input.float(2.0, "Max lỗ/ngày (% equity)", group=group_guard, minval=0.5, step=0.5)
+use_max_drawdown = input.bool(true, "Bật circuit breaker drawdown", group=group_guard)
+max_drawdown_pct = input.float(15.0, "Max drawdown (%)", group=group_guard, minval=5.0, step=1.0)
+dd_reset_mode = input.string("Toàn kỳ", "Reset peak drawdown", options=["Toàn kỳ", "Hàng tháng"], group=group_guard)
+use_cooldown = input.bool(true, "Bật cooldown sau loss", group=group_guard)
+cooldown_bars = input.int(5, "Số nến cooldown sau khi thua", group=group_guard, minval=1, step=1)
+
+// ---------------------- 05. POSITION SIZING ----------------------
+group_size = "05. Position Sizing (risk-based)"
+use_risk_sizing = input.bool(true, "Dùng position size theo % risk", group=group_size)
+risk_per_trade_pct = input.float(0.25, "Risk per trade (% equity)", group=group_size, minval=0.10, step=0.05,
+     tooltip="0.25% = $25 risk trên tài khoản $10K. Đây là mức đã validate trong v23.1.")
+max_qty_cap = input.float(10, "Max qty (lots)", group=group_size, minval=1, step=1)
+fixed_qty_value = input.float(1, "Fixed qty (dùng khi tắt risk sizing)", group=group_size, minval=0.01, step=0.1)
+
+// ---------------------- 06. EMA / TREND ----------------------
+group_ema = "06. EMA / Trend"
+ema_fast_len = input.int(21, "EMA nhanh", group=group_ema, minval=1)
+ema_slow_len = input.int(55, "EMA chậm", group=group_ema, minval=1)
+use_ema_slope = input.bool(false, "Lọc thêm độ dốc EMA", group=group_ema)
+slope_lookback = input.int(3, "Số nến đo độ dốc EMA", group=group_ema, minval=1)
+
+// ---------------------- 07. HTF FILTER ----------------------
+group_htf = "07. HTF Filter"
+use_htf_filter = input.bool(true, "Bật EMA filter khung lớn", group=group_htf)
+htf_tf = input.timeframe("240", "Khung EMA lớn", group=group_htf)
+htf_ema_len = input.int(200, "EMA khung lớn", group=group_htf, minval=1)
+
+// ---------------------- 08. ADX / DMI ----------------------
+group_adx = "08. ADX / DMI"
+adx_len = input.int(14, "Độ dài ADX", group=group_adx, minval=1)
+adx_smoothing = input.int(14, "Làm mượt ADX", group=group_adx, minval=1)
+adx_threshold = input.float(18, "Ngưỡng ADX entry", group=group_adx, minval=1, step=0.5)
+use_di_filter = input.bool(true, "Lọc DI+ / DI-", group=group_adx)
+
+// ---------------------- 09. CANDLE PATTERN ----------------------
+group_candle = "09. Candle Pattern"
+use_engulfing = input.bool(true, "Dùng Engulfing", group=group_candle)
+use_pinbar = input.bool(true, "Dùng Hammer / Shooting Star", group=group_candle)
+wick_body_ratio = input.float(1.8, "Tỷ lệ râu / thân tối thiểu", group=group_candle, minval=1.0, step=0.1)
+max_opposite_wick_ratio = input.float(0.7, "Râu ngược tối đa so với thân", group=group_candle, minval=0.0, step=0.1)
+use_big_candle_filter = input.bool(true, "Không vào nếu nến tín hiệu quá lớn", group=group_candle)
+max_signal_candle_atr = input.float(2.5, "Range nến tín hiệu tối đa theo ATR", group=group_candle, minval=0.5, step=0.1)
+use_min_body_filter = input.bool(true, "Lọc nến có body quá nhỏ (doji)", group=group_candle)
+min_body_atr = input.float(0.05, "Body tối thiểu theo ATR", group=group_candle, minval=0.0, step=0.01)
+
+// ---------------------- 10. PULLBACK / EXTENSION ----------------------
+group_pb = "10. Pullback / Extension"
+use_pullback_filter = input.bool(true, "Chỉ lấy tín hiệu gần EMA", group=group_pb)
+pullback_atr_mult = input.float(2.7, "Pullback tối đa tới EMA chậm theo ATR", group=group_pb, minval=0.1, step=0.1)
+use_max_extension_filter = input.bool(true, "Không vào nếu giá quá xa EMA", group=group_pb)
+max_extension_atr = input.float(3.8, "Max extension theo ATR", group=group_pb, minval=0.5, step=0.1)
+use_strict_extension = input.bool(true, "Strict extension khi Regime Score thấp", group=group_pb)
+strict_extension_atr = input.float(3.6, "Strict extension ATR", group=group_pb, minval=0.5, step=0.1)
+
+// ---------------------- 11. REGIME SCORE ----------------------
+group_regime = "11. Regime Score"
+use_regime_score = input.bool(true, "Bật Regime Score mềm", group=group_regime)
+regime_tf = input.timeframe("240", "Regime TF", group=group_regime)
+regime_adx_len = input.int(14, "Regime ADX length", group=group_regime, minval=1)
+regime_adx_smoothing = input.int(14, "Regime ADX smoothing", group=group_regime, minval=1)
+regime_adx_threshold = input.float(14, "Regime ADX threshold", group=group_regime, minval=1, step=0.5)
+min_regime_score = input.int(2, "Regime Score tối thiểu", group=group_regime, minval=0, maxval=4)
+use_daily_ema_score = input.bool(true, "Daily EMA tính vào score", group=group_regime)
+daily_ema_len = input.int(200, "Daily EMA length", group=group_regime, minval=1)
+use_daily_ema_hard_filter = input.bool(false, "Ép cứng: Long chỉ khi trên Daily EMA", group=group_regime)
+use_atr_score = input.bool(true, "ATR State tính vào score", group=group_regime)
+atr_state_len = input.int(100, "ATR trung bình length", group=group_regime, minval=5)
+min_atr_state_ratio = input.float(0.70, "ATR hiện tại / ATR TB tối thiểu", group=group_regime, minval=0.1, step=0.05)
+
+// ---------------------- 12. VOLUME / RANGE ----------------------
+group_vol = "12. Volume / Range Filter"
+use_volume_filter = input.bool(false, "Bật lọc volume", group=group_vol)
+vol_len = input.int(20, "Volume MA length", group=group_vol, minval=1)
+min_vol_ratio = input.float(0.6, "Volume tối thiểu / MA", group=group_vol, minval=0.1, step=0.1)
+use_range_filter = input.bool(false, "Bật lọc range nến", group=group_vol)
+max_range_atr = input.float(2.5, "Max range nến theo ATR", group=group_vol, minval=0.5, step=0.1)
+
+// ---------------------- 13. RISK / EXIT ----------------------
+group_risk = "13. Risk / Exit"
+atr_len = input.int(14, "ATR length", group=group_risk, minval=1)
+sl_atr_mult = input.float(1.0, "Initial SL theo ATR", group=group_risk, minval=0.1, step=0.05)
+rr_ratio = input.float(2.15, "Take Profit RR", group=group_risk, minval=0.5, step=0.05)
+use_trailing = input.bool(true, "Bật ATR trailing stop", group=group_risk)
+trail_atr_mult = input.float(3.6, "Trailing ATR multiplier", group=group_risk, minval=0.5, step=0.1)
+trail_trigger_r = input.float(1.65, "Chỉ trailing sau khi đạt R", group=group_risk, minval=0.1, step=0.05)
+use_breakeven = input.bool(false, "Bật breakeven", group=group_risk)
+breakeven_trigger_r = input.float(1.5, "Breakeven trigger R", group=group_risk, minval=0.1, step=0.05)
+breakeven_offset_r = input.float(0.05, "Breakeven offset R", group=group_risk, minval=0.0, step=0.01)
+use_time_stop = input.bool(false, "Bật time stop", group=group_risk)
+time_stop_bars = input.int(220, "Time stop bars", group=group_risk, minval=1)
+
+// ---------------------- 14. CURRENCY GIVEBACK v23.2 ----------------------
+// [C1–C5] Toàn bộ group này được căn chỉnh lại dựa trên data analysis v23.1.
+group_harness = "14. Currency Giveback Exit v23.3"
+execute_harness_exit = input.bool(true, "THỰC THI Currency Giveback Exit", group=group_harness)
+trigger_mode = input.string("R-multiple", "Trigger mode",
+     options=["R-multiple", "% Equity", "USD cố định"],
+     group=group_harness,
+     // [C1] Đổi mặc định từ "USD cố định" sang "R-multiple" vì USD $80 chưa bao giờ chạy.
+     // R-multiple tự scale với position size — không phụ thuộc cài đặt tài khoản cố định.
+     tooltip="R-multiple: trigger tự scale theo risk/position. Được khuyến nghị sau khi CGB $80 không kích hoạt lần nào trong 2024-2026.")
+// [C1] trigger_r_mult mặc định 1.0 (thay vì 1.5 cũ) — 1R ≈ $25 với risk sizing 0.25%
+trigger_r_mult = input.float(1.0, "Trigger (R-multiple)", group=group_harness, minval=0.3, step=0.1,
+     tooltip="1.0R = CGB arm khi trade lãi ≥ 1× risk ban đầu. Với risk sizing 0.25% trên $10K: 1.0R ≈ $25. Thấp hơn avg winner $75-77 nên CGB sẽ arm (khắc phục $80 cũ không bao giờ chạy).")
+trigger_pct_equity = input.float(0.5, "Trigger (% equity)", group=group_harness, minval=0.1, step=0.1,
+     tooltip="0.5% = $50 trên tài khoản $10K. Thấp hơn mặc định 0.8% cũ.")
+trigger_usd_fixed = input.float(50.0, "Trigger (USD cố định)", group=group_harness, minval=10.0, step=5.0,
+     tooltip="Đổi từ $80 (không bao giờ hit) xuống $50 dựa trên avg winner $75-77.")
+harness_giveback_pct = input.float(40.0, "Giveback %", group=group_harness, minval=5.0, maxval=95.0, step=5.0)
+
+// [C2] Thêm min_keep theo R-multiple — mode mới cho R-multiple trigger
+min_keep_r_mult = input.float(0.30, "Min keep profit (R-multiple)",
+     group=group_harness, minval=0.0, step=0.05,
+     tooltip="0.30R = giữ lại tối thiểu 30% của 1R risk khi CGB thoát. Với risk sizing 0.25% trên $10K (1R≈$25): ≈ $7.5.")
+min_keep_pct_equity = input.float(0.3, "Min keep profit (% equity)", group=group_harness, minval=0.0, step=0.1)
+min_keep_usd_fixed = input.float(20.0, "Min keep profit (USD cố định)", group=group_harness, minval=0.0, step=5.0,
+     tooltip="Giảm từ $50 xuống $20. $50 cũ quá cao — đây là lý do CGB thoát nhưng không pass min_keep.")
+harness_near_buffer = input.float(10.0, "Marker gần kích hoạt: cách %", group=group_harness, minval=1.0, step=1.0)
+// [C3] use_intrabar_mfe: đổi mặc định từ false → true
+use_intrabar_mfe = input.bool(true, "Intrabar giveback (dùng high/low)",
+     group=group_harness,
+     // Root cause: với mặc định false, CGB chỉ check ở bar close. MFE intrabar đôi khi
+     // vượt $80 nhưng close-bar profit không đạt → CGB không bao giờ arm.
+     // Đổi sang true để bắt đỉnh profit thực sự, không chỉ snapshot lúc đóng nến.
+     tooltip="[v23.2 mặc định BẬT] Dùng high/low intrabar để tính GIVEBACK% đã từng đạt. Giải quyết vấn đề CGB không arm dù MFE đã vượt ngưỡng trong lúc nến đang chạy.")
+// [D2] v23.3: input mới — cho phép TRIGGER CGB cũng dùng intrabar max profit.
+// Tách khỏi use_intrabar_mfe để A/B: v23.2 = OFF (trigger close-bar), v23.3 = ON.
+use_intrabar_trigger = input.bool(true, "Intrabar TRIGGER (v23.3)",
+     group=group_harness,
+     tooltip="[v23.3 mặc định BẬT] Trigger CGB dùng intrabar max profit (đỉnh giá kể từ entry × position value) thay vì chỉ close-bar profit, đồng bộ với giveback% intrabar. TẮT = hành vi v23.2 (trigger close-bar).")
+show_harness_markers = input.bool(true, "Hiển thị marker CGB/CGB~/EXIT", group=group_harness)
+
+// [C4] Commission guard: CGB chỉ thoát nếu profit ≥ guard_mult × est_commission
+// Từ data v23.1: avg commission ≈ $248/61 trades ≈ $4.07/trade hai chiều.
+// Với guard 1.5×: min profit để CGB thoát ≈ $4 × 1.5 = $6 — rất thấp, không ảnh hưởng nhiều.
+// Mục đích: bảo vệ trong edge case equity nhỏ hoặc position size thấp.
+use_commission_guard = input.bool(true, "Bật Commission Guard",
+     group=group_harness,
+     tooltip="CGB chỉ thoát nếu profit > guard_mult × estimated commission (2 chiều). Tránh thoát khi profit chưa bù được phí.")
+commission_guard_mult = input.float(1.5, "Commission Guard multiplier", group=group_harness, minval=0.5, step=0.5)
+commission_pct_estimate = input.float(0.02, "Commission % để ước tính", group=group_harness, minval=0.0, step=0.01,
+     tooltip="Phải khớp với commission_value trong strategy(). Mặc định 0.02 = 0.02%/chiều.")
+
+// ---------------------- 15. DISPLAY ----------------------
+group_disp = "15. Display / Debug"
+show_bg = input.bool(true, "Màu nền xu hướng", group=group_disp)
+show_table = input.bool(true, "Bảng debug", group=group_disp)
+show_shapes = input.bool(true, "Hiển thị tín hiệu", group=group_disp)
+show_block_markers = input.bool(false, "Marker filter bị chặn", group=group_disp)
+show_session_badge = input.bool(true, "Badge phiên trên chart", group=group_disp)
+show_cgb_diagnostic_markers = input.bool(true, "Marker CGB Tune: TRG/GB/KP/RDY", group=group_disp)
+
+// ============================================================================
+// PRESET OVERRIDES
+// ============================================================================
+is_v233 = preset == "V23.3 Final Forward Test" or preset == "V23.3 Debug Only"
+is_v232_bench = preset == "V23.2 Final Benchmark"
+is_v231_bench = preset == "V23.1 Strict Benchmark"
+is_v229_body = preset == "V22.9 Strict Body Benchmark"
+is_v228 = preset == "V22.8 RR3.2 Benchmark"
+is_any_package = is_v233 or is_v232_bench or is_v231_bench or is_v229_body or is_v228
+
+// Base package params (chung cho tất cả preset trừ Custom)
+if is_any_package
+    trade_direction := "Long Only"
+    use_risk_sizing := true
+    risk_per_trade_pct := 0.25
+    max_qty_cap := 10
+    min_regime_score := 3
+    use_strict_extension := true
+    strict_extension_atr := 3.0
+    use_session_filter := false
+    use_volume_filter := false
+    use_range_filter := false
+    max_daily_loss_pct := 0.75
+    max_drawdown_pct := 5.0
+    dd_reset_mode := "Hàng tháng"
+    use_breakeven := false
+    use_time_stop := false
+    rr_ratio := 3.2
+    use_trailing := true
+    trail_trigger_r := 2.6
+    trail_atr_mult := 5.5
+    execute_harness_exit := true
+    harness_giveback_pct := 40.0
+    // [D2] mặc định an toàn: mọi preset trigger close-bar; chỉ v23.3 bật intrabar trigger.
+    use_intrabar_trigger := false
+
+// [C6/D2] V23.3: Entry Strict ADX22 + CGB R-multiple, intrabar giveback ON + intrabar TRIGGER ON
+if is_v233
+    adx_threshold := 22.0
+    pullback_atr_mult := 2.3
+    min_body_atr := 0.10
+    // [C1] R-multiple trigger — scale với position size
+    trigger_mode := "R-multiple"
+    trigger_r_mult := 1.0
+    // [C2] min_keep cũng theo R-multiple
+    min_keep_r_mult := 0.30
+    // [C3] Intrabar MFE bắt đỉnh thực sự (giveback%)
+    use_intrabar_mfe := true
+    // [D2] v23.3: trigger cũng dùng intrabar max profit
+    use_intrabar_trigger := true
+    // [C4] Commission guard bật
+    use_commission_guard := true
+    commission_guard_mult := 1.5
+
+if preset == "V23.3 Debug Only"
+    execute_harness_exit := false
+
+// [D2] V23.2 Final Benchmark: y hệt v23.3 nhưng TRIGGER close-bar (intrabar giveback vẫn ON)
+// → tái hiện chính xác hành vi v23.2 để A/B so sánh tác động của intrabar trigger.
+if is_v232_bench
+    adx_threshold := 22.0
+    pullback_atr_mult := 2.3
+    min_body_atr := 0.10
+    trigger_mode := "R-multiple"
+    trigger_r_mult := 1.0
+    min_keep_r_mult := 0.30
+    use_intrabar_mfe := true
+    use_intrabar_trigger := false
+    use_commission_guard := true
+    commission_guard_mult := 1.5
+
+// [C7] V23.1 Strict Benchmark: giữ nguyên config cũ để A/B compare
+// Entry giống V23.2 nhưng CGB giữ USD $80 / min_keep $50 / intrabar OFF
+if is_v231_bench
+    adx_threshold := 22.0
+    pullback_atr_mult := 2.3
+    min_body_atr := 0.10
+    trigger_mode := "USD cố định"
+    trigger_usd_fixed := 80.0
+    min_keep_usd_fixed := 50.0
+    use_intrabar_mfe := false
+    use_commission_guard := false
+
+// V22.9 Strict Body: entry Strict ADX22 + CGB USD $80 gốc (để compare)
+if is_v229_body
+    adx_threshold := 22.0
+    pullback_atr_mult := 2.3
+    min_body_atr := 0.10
+    trigger_mode := "USD cố định"
+    trigger_usd_fixed := 80.0
+    min_keep_usd_fixed := 50.0
+    use_intrabar_mfe := false
+
+// V22.8: entry Baseline (ADX 18, PB 2.7, body 0.05)
+if is_v228
+    adx_threshold := 18.0
+    pullback_atr_mult := 2.7
+    min_body_atr := 0.05
+    trigger_mode := "USD cố định"
+    trigger_usd_fixed := 80.0
+    min_keep_usd_fixed := 50.0
+    use_intrabar_mfe := false
+    use_commission_guard := false
+
+// Recompute session_allowed after preset override
+session_allowed := not use_session_filter or (in_london or in_ny)
+effective_preset = preset
+effective_size_mode = use_risk_sizing ? "RISK" : "FIXED"
+effective_session_mode = use_session_filter ? "ON" : "OFF"
+effective_trigger_mode = trigger_mode
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+atr_val = ta.atr(atr_len)
+atr_avg = ta.sma(atr_val, atr_state_len)
+atr_ratio = atr_avg > 0 ? atr_val / atr_avg : 1.0
+
+[plus_di, minus_di, adx_val] = ta.dmi(adx_len, adx_smoothing)
+
+// [1] HTF dùng [1] để tránh soft repaint khi nến HTF chưa đóng
+f_confirmed_dmi(_len, _smooth) =>
+    [p, m, a] = ta.dmi(_len, _smooth)
+    [p[1], m[1], a[1]]
+
+htf_ema = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htf_ema_len)[1], barmerge.gaps_off, barmerge.lookahead_off)
+daily_ema = request.security(syminfo.tickerid, "D", ta.ema(close, daily_ema_len)[1], barmerge.gaps_off, barmerge.lookahead_off)
+[regime_plus_di, regime_minus_di, regime_adx] = request.security(syminfo.tickerid, regime_tf, f_confirmed_dmi(regime_adx_len, regime_adx_smoothing), barmerge.gaps_off, barmerge.lookahead_off)
+
+ema_slope_up = ema_fast > ema_fast[slope_lookback] and ema_slow >= ema_slow[slope_lookback]
+ema_slope_down = ema_fast < ema_fast[slope_lookback] and ema_slow <= ema_slow[slope_lookback]
+trend_up = ema_fast > ema_slow and (not use_ema_slope or ema_slope_up)
+trend_down = ema_fast < ema_slow and (not use_ema_slope or ema_slope_down)
+
+htf_up_ok = not use_htf_filter or close > htf_ema
+htf_down_ok = not use_htf_filter or close < htf_ema
+adx_ok = adx_val >= adx_threshold
+di_buy_ok = not use_di_filter or plus_di > minus_di
+di_sell_ok = not use_di_filter or minus_di > plus_di
+ema_distance_atr = atr_val > 0 ? math.abs(close - ema_slow) / atr_val : 0.0
+pullback_ok = not use_pullback_filter or ema_distance_atr <= pullback_atr_mult
+extension_ok = not use_max_extension_filter or ema_distance_atr <= max_extension_atr
+
+body = math.abs(close - open)
+body_atr = atr_val > 0 ? body / atr_val : 0.0
+real_body = math.max(body, syminfo.mintick * 10)
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+signal_range_atr = atr_val > 0 ? (high - low) / atr_val : 0.0
+big_candle_ok = not use_big_candle_filter or signal_range_atr <= max_signal_candle_atr
+min_body_ok = not use_min_body_filter or body_atr >= min_body_atr
+
+prev_bear = close[1] < open[1]
+prev_bull = close[1] > open[1]
+curr_bull = close > open
+curr_bear = close < open
+bullish_engulfing = curr_bull and prev_bear and open <= close[1] and close >= open[1]
+bearish_engulfing = curr_bear and prev_bull and open >= close[1] and close <= open[1]
+hammer = curr_bull and lower_wick >= wick_body_ratio * real_body and upper_wick <= max_opposite_wick_ratio * real_body
+shooting_star = curr_bear and upper_wick >= wick_body_ratio * real_body and lower_wick <= max_opposite_wick_ratio * real_body
+bullish_pattern = (use_engulfing and bullish_engulfing) or (use_pinbar and hammer)
+bearish_pattern = (use_engulfing and bearish_engulfing) or (use_pinbar and shooting_star)
+
+// Regime Score — component tắt = PASS (không phạt điểm)
+score_daily_long = not use_daily_ema_score ? 1 : close > daily_ema ? 1 : 0
+score_daily_short = not use_daily_ema_score ? 1 : close < daily_ema ? 1 : 0
+score_dmi_long = regime_plus_di > regime_minus_di ? 1 : 0
+score_dmi_short = regime_minus_di > regime_plus_di ? 1 : 0
+score_adx_r = regime_adx >= regime_adx_threshold ? 1 : 0
+score_atr = not use_atr_score ? 1 : atr_ratio >= min_atr_state_ratio ? 1 : 0
+regime_score_long = score_daily_long + score_dmi_long + score_adx_r + score_atr
+regime_score_short = score_daily_short + score_dmi_short + score_adx_r + score_atr
+regime_long_ok = not use_regime_score or regime_score_long >= min_regime_score
+regime_short_ok = not use_regime_score or regime_score_short >= min_regime_score
+daily_hard_long_ok = not use_daily_ema_hard_filter or close > daily_ema
+daily_hard_short_ok = not use_daily_ema_hard_filter or close < daily_ema
+strict_extension_ok_long = not use_strict_extension or regime_score_long > min_regime_score or ema_distance_atr <= strict_extension_atr
+strict_extension_ok_short = not use_strict_extension or regime_score_short > min_regime_score or ema_distance_atr <= strict_extension_atr
+
+vol_avg = ta.sma(volume, vol_len)
+vol_ratio = vol_avg > 0 ? volume / vol_avg : 1.0
+volume_ok = not use_volume_filter or vol_ratio >= min_vol_ratio
+// [opt v23.2.1] range_atr trùng signal_range_atr — dùng lại, bỏ tính lặp
+range_ok = not use_range_filter or signal_range_atr <= max_range_atr
+
+// ============================================================================
+// RISK GUARDS
+// ============================================================================
+var float day_start_equity = na
+var float daily_pnl_pct = 0.0
+is_new_day = ta.change(time("D")) != 0
+if na(day_start_equity) or is_new_day
+    day_start_equity := strategy.equity
+daily_pnl_pct := day_start_equity > 0 ? (strategy.equity - day_start_equity) / day_start_equity * 100.0 : 0.0
+daily_loss_breached = use_max_daily_loss and daily_pnl_pct <= -max_daily_loss_pct
+
+var float peak_equity = na
+is_new_month = ta.change(time("M")) != 0
+if na(peak_equity) or (dd_reset_mode == "Hàng tháng" and is_new_month)
+    peak_equity := strategy.equity
+else
+    peak_equity := math.max(peak_equity, strategy.equity)
+current_dd_pct = peak_equity > 0 ? (strategy.equity - peak_equity) / peak_equity * 100.0 : 0.0
+dd_breached = use_max_drawdown and current_dd_pct <= -max_drawdown_pct
+
+var int last_loss_bar = na
+new_closed_trade = strategy.closedtrades > nz(strategy.closedtrades[1])
+last_trade_loss = strategy.closedtrades > 0 and new_closed_trade and strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+if last_trade_loss
+    last_loss_bar := bar_index
+bars_since_loss = na(last_loss_bar) ? 9999 : bar_index - last_loss_bar
+in_cooldown = use_cooldown and not na(last_loss_bar) and bars_since_loss < cooldown_bars
+
+can_long = (trade_direction == "Long Only" or trade_direction == "Both")
+can_short = (trade_direction == "Short Only" or trade_direction == "Both")
+bar_ok = not confirm_on_close or barstate.isconfirmed
+friday_filter_ok = not no_friday_hold
+risk_guards_ok = not daily_loss_breached and not dd_breached and not in_cooldown and session_allowed and friday_filter_ok
+
+raw_buy = trend_up and htf_up_ok and adx_ok and di_buy_ok and pullback_ok and extension_ok and strict_extension_ok_long and big_candle_ok and min_body_ok and volume_ok and range_ok and bullish_pattern and regime_long_ok and daily_hard_long_ok
+raw_sell = trend_down and htf_down_ok and adx_ok and di_sell_ok and pullback_ok and extension_ok and strict_extension_ok_short and big_candle_ok and min_body_ok and volume_ok and range_ok and bearish_pattern and regime_short_ok and daily_hard_short_ok
+
+buy_signal = in_date_range and bar_ok and can_long and risk_guards_ok and raw_buy
+sell_signal = in_date_range and bar_ok and can_short and risk_guards_ok and raw_sell
+
+// ============================================================================
+// POSITION STATE
+// ============================================================================
+var float entry_price = na
+var float entry_risk = na
+var float entry_sl = na
+var float entry_tp = na
+var float entry_atr = na
+var int entry_bar = na
+var float highest_since_entry = na
+var float lowest_since_entry = na
+var float max_strategy_open_profit = na
+var float cgb_max_giveback_seen = na
+var int cgb_trigger_bars = 0
+var int cgb_giveback_bars = 0
+var int cgb_keep_bars = 0
+var int cgb_exit_bars = 0
+var bool exit_called_this_bar = false
+// [FIX v23.1] Ratchet trailing stop — chỉ siết chặt, không lùi lại khi ATR giãn
+var float best_long_stop = na
+var float best_short_stop = na
+// [C5] Persistent CGB performance tracker
+var int cgb_fired_count = 0
+var float cgb_profit_captured_total = 0.0
+
+new_long = buy_signal and strategy.position_size <= 0
+new_short = sell_signal and strategy.position_size >= 0
+
+// [opt v23.2.1] risk long/short giống hệt nhau (= sl_atr_mult*atr) — gộp 1 biến
+risk_candidate = sl_atr_mult * atr_val
+long_sl_candidate = close - risk_candidate
+long_tp_candidate = close + rr_ratio * risk_candidate
+short_sl_candidate = close + risk_candidate
+short_tp_candidate = close - rr_ratio * risk_candidate
+
+calc_qty_from_risk(float risk_amt) =>
+    sl_dist = sl_atr_mult * atr_val
+    pv = syminfo.pointvalue
+    sl_dist > 0 and pv > 0 ? risk_amt / (sl_dist * pv) : 1.0
+
+risk_amt = strategy.equity * risk_per_trade_pct / 100.0
+// [opt v23.2.1] long_qty/short_qty công thức y hệt — tính 1 lần
+trade_qty = use_risk_sizing ? math.min(calc_qty_from_risk(risk_amt), max_qty_cap) : fixed_qty_value
+
+if new_long and risk_candidate > 0
+    strategy.close("Short", comment="Close Short on Buy")
+    entry_price := close
+    entry_sl := long_sl_candidate
+    entry_risk := risk_candidate
+    entry_tp := long_tp_candidate
+    entry_atr := atr_val
+    entry_bar := bar_index
+    highest_since_entry := high
+    lowest_since_entry := low
+    max_strategy_open_profit := 0.0
+    cgb_max_giveback_seen := 0.0
+    cgb_trigger_bars := 0
+    cgb_giveback_bars := 0
+    cgb_keep_bars := 0
+    cgb_exit_bars := 0
+    best_long_stop := na
+    best_short_stop := na
+    strategy.entry("Long", strategy.long, qty=trade_qty, comment="BUY v23.3 H1")
+    strategy.exit("Long Exit", from_entry="Long", stop=long_sl_candidate, limit=long_tp_candidate, comment="Long Exit")
+
+if new_short and risk_candidate > 0
+    strategy.close("Long", comment="Close Long on Sell")
+    entry_price := close
+    entry_sl := short_sl_candidate
+    entry_risk := risk_candidate
+    entry_tp := short_tp_candidate
+    entry_atr := atr_val
+    entry_bar := bar_index
+    highest_since_entry := high
+    lowest_since_entry := low
+    max_strategy_open_profit := 0.0
+    cgb_max_giveback_seen := 0.0
+    cgb_trigger_bars := 0
+    cgb_giveback_bars := 0
+    cgb_keep_bars := 0
+    cgb_exit_bars := 0
+    best_long_stop := na
+    best_short_stop := na
+    strategy.entry("Short", strategy.short, qty=trade_qty, comment="SELL v23.3 H1")
+    strategy.exit("Short Exit", from_entry="Short", stop=short_sl_candidate, limit=short_tp_candidate, comment="Short Exit")
+
+// [FIX v23.1] just_acted guard: tránh exit-management sai trên nến đảo chiều
+just_acted = new_long or new_short
+in_long = strategy.position_size > 0 and not just_acted
+in_short = strategy.position_size < 0 and not just_acted
+in_trade = in_long or in_short
+bars_in_trade = in_trade and not na(entry_bar) ? bar_index - entry_bar : 0
+
+if in_trade
+    highest_since_entry := na(highest_since_entry) ? high : math.max(highest_since_entry, high)
+    lowest_since_entry := na(lowest_since_entry) ? low : math.min(lowest_since_entry, low)
+
+current_r = 0.0
+if in_long and not na(entry_price) and entry_risk > 0
+    current_r := (close - entry_price) / entry_risk
+if in_short and not na(entry_price) and entry_risk > 0
+    current_r := (entry_price - close) / entry_risk
+
+is_new_bar_entry = ta.change(time) != 0
+if is_new_bar_entry
+    exit_called_this_bar := false
+
+// ============================================================================
+// EXIT MANAGEMENT (trailing ratchet từ v23.1)
+// ============================================================================
+if in_long and entry_risk > 0
+    long_stop = entry_sl
+    if use_breakeven and current_r >= breakeven_trigger_r
+        long_stop := math.max(long_stop, entry_price + breakeven_offset_r * entry_risk)
+    if use_trailing and current_r >= trail_trigger_r
+        trail_stop = nz(highest_since_entry, high) - trail_atr_mult * atr_val
+        long_stop := math.max(long_stop, trail_stop)
+    // [FIX v23.1] Ratchet: stop chỉ đi lên
+    best_long_stop := na(best_long_stop) ? long_stop : math.max(best_long_stop, long_stop)
+    strategy.exit("Long Exit", from_entry="Long", stop=best_long_stop, limit=entry_tp, comment="Long Exit")
+
+if in_short and entry_risk > 0
+    short_stop = entry_sl
+    if use_breakeven and current_r >= breakeven_trigger_r
+        short_stop := math.min(short_stop, entry_price - breakeven_offset_r * entry_risk)
+    if use_trailing and current_r >= trail_trigger_r
+        trail_stop = nz(lowest_since_entry, low) + trail_atr_mult * atr_val
+        short_stop := math.min(short_stop, trail_stop)
+    // [FIX v23.1] Ratchet: stop chỉ đi xuống
+    best_short_stop := na(best_short_stop) ? short_stop : math.min(best_short_stop, short_stop)
+    strategy.exit("Short Exit", from_entry="Short", stop=best_short_stop, limit=entry_tp, comment="Short Exit")
+
+if use_time_stop and in_trade and bars_in_trade >= time_stop_bars
+    strategy.close(in_long ? "Long" : "Short", comment="Time Stop")
+    exit_called_this_bar := true
+
+// ============================================================================
+// CURRENCY GIVEBACK EXIT v23.2
+// ============================================================================
+strategy_profit_now = in_trade ? strategy.openprofit : 0.0
+
+if in_trade
+    max_strategy_open_profit := na(max_strategy_open_profit) ? strategy_profit_now : math.max(max_strategy_open_profit, strategy_profit_now)
+
+// [C1] Trigger calculation — R-multiple auto-scales với position size
+float trigger_value = 0.0
+float r_position_value = entry_risk > 0 ? entry_risk * math.abs(strategy.position_size) * syminfo.pointvalue : 0.0
+if trigger_mode == "R-multiple"
+    trigger_value := trigger_r_mult * r_position_value
+else if trigger_mode == "% Equity"
+    trigger_value := strategy.equity * trigger_pct_equity / 100.0
+else
+    trigger_value := trigger_usd_fixed
+
+// [C2] min_keep — R-multiple mode mới
+float min_keep_value = 0.0
+if trigger_mode == "R-multiple"
+    min_keep_value := min_keep_r_mult * r_position_value
+else if trigger_mode == "% Equity"
+    min_keep_value := strategy.equity * min_keep_pct_equity / 100.0
+else
+    min_keep_value := min_keep_usd_fixed
+
+// [C4] Commission guard: ước tính commission hai chiều (entry + exit)
+// commission_pct_estimate/100 × 2 × position_value_at_entry
+float est_commission_per_trade = na
+if not na(entry_price) and math.abs(strategy.position_size) > 0
+    est_commission_per_trade := math.abs(strategy.position_size) * syminfo.pointvalue * entry_price * commission_pct_estimate / 100.0 * 2.0
+float commission_guard_min = use_commission_guard and not na(est_commission_per_trade) ? commission_guard_mult * est_commission_per_trade : 0.0
+
+max_profit_for_gb = math.max(nz(max_strategy_open_profit, 0), 0)
+currency_giveback_pct = max_profit_for_gb > 0 ? math.max(0.0, (max_profit_for_gb - strategy_profit_now) / max_profit_for_gb * 100.0) : 0.0
+
+// [C3] Intrabar MFE (mặc định ON trong v23.2)
+float intrabar_gb_pct = currency_giveback_pct
+if use_intrabar_mfe and in_trade
+    if in_long and not na(highest_since_entry) and not na(entry_price)
+        hi = nz(highest_since_entry, high)
+        if hi > entry_price and (hi - entry_price) > 0
+            float bar_pct = math.max(0.0, (hi - low) / (hi - entry_price) * 100.0)
+            intrabar_gb_pct := math.max(currency_giveback_pct, bar_pct)
+    if in_short and not na(lowest_since_entry) and not na(entry_price)
+        lo = nz(lowest_since_entry, low)
+        if lo < entry_price and (entry_price - lo) > 0
+            float bar_pct = math.max(0.0, (high - lo) / (entry_price - lo) * 100.0)
+            intrabar_gb_pct := math.max(currency_giveback_pct, bar_pct)
+
+// [D2] v23.3: trigger basis. Khi use_intrabar_trigger BẬT, dùng intrabar max profit
+// (đỉnh giá kể từ entry × position value) thay vì chỉ close-bar profit, để TRIGGER
+// đồng bộ với giveback% intrabar. Khi TẮT (v23.2 / benchmark) → giữ close-bar, không đổi kết quả.
+float intrabar_max_profit = max_profit_for_gb
+if use_intrabar_trigger and in_trade and not na(entry_price) and math.abs(strategy.position_size) > 0
+    pv_pos = math.abs(strategy.position_size) * syminfo.pointvalue
+    if in_long and not na(highest_since_entry)
+        intrabar_max_profit := math.max(max_profit_for_gb, (nz(highest_since_entry, high) - entry_price) * pv_pos)
+    if in_short and not na(lowest_since_entry)
+        intrabar_max_profit := math.max(max_profit_for_gb, (entry_price - nz(lowest_since_entry, low)) * pv_pos)
+float trigger_profit_basis = use_intrabar_trigger ? intrabar_max_profit : max_profit_for_gb
+
+currency_trigger_raw = in_trade and trigger_profit_basis >= trigger_value
+currency_giveback_pass = in_trade and intrabar_gb_pct >= harness_giveback_pct
+currency_keep_pass = in_trade and strategy_profit_now >= min_keep_value
+// [C4] commission guard pass
+commission_guard_pass = not use_commission_guard or strategy_profit_now >= commission_guard_min
+currency_near_raw = in_trade and currency_trigger_raw and intrabar_gb_pct >= math.max(harness_giveback_pct - harness_near_buffer, 0.0) and intrabar_gb_pct < harness_giveback_pct and currency_keep_pass and commission_guard_pass
+currency_exit_raw = in_trade and currency_trigger_raw and currency_giveback_pass and currency_keep_pass and commission_guard_pass
+
+if in_trade
+    cgb_max_giveback_seen := na(cgb_max_giveback_seen) ? intrabar_gb_pct : math.max(cgb_max_giveback_seen, intrabar_gb_pct)
+    cgb_trigger_bars += currency_trigger_raw ? 1 : 0
+    cgb_giveback_bars += currency_giveback_pass ? 1 : 0
+    cgb_keep_bars += currency_keep_pass ? 1 : 0
+    cgb_exit_bars += currency_exit_raw ? 1 : 0
+
+cgb_block_reason = not in_trade ? "NO TRADE" : not currency_trigger_raw ? "WAIT TRIGGER" : not currency_giveback_pass ? "WAIT GIVEBACK" : not currency_keep_pass ? "FAIL MIN KEEP" : not commission_guard_pass ? "FAIL COMM GUARD" : "EXIT READY"
+
+currency_exit_condition = barstate.isconfirmed and execute_harness_exit and currency_exit_raw
+
+if currency_exit_condition
+    strategy.close(in_long ? "Long" : "Short", comment="v23.3 CGB Exit")
+    exit_called_this_bar := true
+    // [C5] Tracking
+    cgb_fired_count += 1
+    cgb_profit_captured_total += strategy_profit_now
+
+if daily_loss_breached and in_trade
+    strategy.close(in_long ? "Long" : "Short", comment="Daily Loss Limit")
+    exit_called_this_bar := true
+
+if dd_breached and in_trade
+    strategy.close(in_long ? "Long" : "Short", comment="DD Circuit Breaker")
+    exit_called_this_bar := true
+
+if no_friday_hold and in_trade
+    strategy.close(in_long ? "Long" : "Short", comment="Friday Close")
+    exit_called_this_bar := true
+
+// Reset state after flat (not just_acted để tránh xoá state mới set khi trade mới và cũ cùng bar)
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and not just_acted
+    entry_price := na
+    entry_sl := na
+    entry_risk := na
+    entry_tp := na
+    entry_atr := na
+    entry_bar := na
+    highest_since_entry := na
+    lowest_since_entry := na
+    max_strategy_open_profit := na
+    best_long_stop := na
+    best_short_stop := na
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+plot(ema_fast, "EMA Fast", color=color.new(color.green, 0), linewidth=2)
+plot(ema_slow, "EMA Slow", color=color.new(color.red, 0), linewidth=2)
+plot(htf_ema, "HTF EMA", color=color.new(color.orange, 0), linewidth=1)
+plot(daily_ema, "Daily EMA", color=color.new(color.blue, 30), linewidth=1)
+
+// [FIX v23.1] bgcolor KHÔNG gate bởi session
+bgcolor(show_bg ? (trend_up ? color.new(color.green, 91) : trend_down ? color.new(color.red, 91) : na) : na)
+
+// [FIX v23.1] Dùng new_long/new_short (lệnh thật), không dùng signal thô
+plotshape(show_shapes and new_long, title="BUY", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), text="BUY", textcolor=color.lime, size=size.small)
+plotshape(show_shapes and new_short, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.red, size=size.small)
+
+plotshape(show_harness_markers and currency_near_raw and not currency_exit_raw, title="CGB Near", style=shape.labeldown, location=location.abovebar, color=color.new(color.aqua, 0), text="CGB~", textcolor=color.black, size=size.tiny)
+plotshape(show_harness_markers and currency_exit_raw, title="CGB Raw", style=shape.labeldown, location=location.abovebar, color=color.new(color.blue, 0), text="CGB", textcolor=color.white, size=size.tiny)
+plotshape(show_harness_markers and exit_called_this_bar, title="EXIT Called", style=shape.labeldown, location=location.abovebar, color=color.new(color.fuchsia, 0), text="EXIT", textcolor=color.white, size=size.tiny)
+plotshape(show_cgb_diagnostic_markers and currency_trigger_raw and not currency_giveback_pass, title="TRG", style=shape.circle, location=location.abovebar, color=color.new(color.yellow, 0), text="TRG", textcolor=color.black, size=size.tiny)
+plotshape(show_cgb_diagnostic_markers and currency_trigger_raw and currency_giveback_pass and not currency_keep_pass, title="GB!", style=shape.circle, location=location.abovebar, color=color.new(color.red, 0), text="GB!", textcolor=color.white, size=size.tiny)
+plotshape(show_cgb_diagnostic_markers and currency_trigger_raw and currency_giveback_pass and currency_keep_pass and not commission_guard_pass, title="CG!", style=shape.circle, location=location.abovebar, color=color.new(color.orange, 0), text="CG!", textcolor=color.white, size=size.tiny)
+plotshape(show_cgb_diagnostic_markers and currency_exit_raw, title="RDY", style=shape.circle, location=location.abovebar, color=color.new(color.blue, 0), text="RDY", textcolor=color.white, size=size.tiny)
+
+base_bull_candidate = bullish_pattern and trend_up and min_body_ok
+plotshape(show_block_markers and base_bull_candidate and not regime_long_ok, title="Blk Regime", style=shape.circle, location=location.belowbar, color=color.new(color.orange, 0), text="RG", size=size.tiny)
+plotshape(show_block_markers and base_bull_candidate and regime_long_ok and not big_candle_ok, title="Blk BC", style=shape.circle, location=location.belowbar, color=color.new(color.gray, 0), text="BC", size=size.tiny)
+plotshape(show_block_markers and base_bull_candidate and regime_long_ok and big_candle_ok and not extension_ok, title="Blk Ext", style=shape.circle, location=location.belowbar, color=color.new(color.blue, 0), text="EX", size=size.tiny)
+
+var table session_t = table.new(position.top_left, 1, 1, bgcolor=color.new(color.black, 60), border_width=0)
+if show_session_badge and barstate.islast
+    string session_txt = in_london ? "LONDON" : in_ny ? "NEW YORK" : "OFF-HOURS"
+    color session_col = in_london ? color.yellow : in_ny ? color.aqua : color.gray
+    table.cell(session_t, 0, 0, session_txt, text_color=session_col, text_size=size.large)
+
+// Hidden plots
+plot(strategy_profit_now, "v23.3 Open Profit", display=display.none)
+plot(nz(max_strategy_open_profit), "v23.3 Max Open Profit", display=display.none)
+plot(currency_giveback_pct, "v23.3 Giveback Pct", display=display.none)
+plot(intrabar_gb_pct, "v23.3 Intrabar GB Pct", display=display.none)
+plot(currency_trigger_raw ? 1 : 0, "v23.3 Trigger Raw", display=display.none)
+plot(currency_exit_raw ? 1 : 0, "v23.3 Giveback Raw", display=display.none)
+plot(currency_giveback_pass ? 1 : 0, "v23.3 GB Pass", display=display.none)
+plot(currency_keep_pass ? 1 : 0, "v23.3 Keep Pass", display=display.none)
+plot(commission_guard_pass ? 1 : 0, "v23.3 Comm Guard Pass", display=display.none)
+plot(nz(cgb_max_giveback_seen), "v23.3 Max GB Seen", display=display.none)
+plot(cgb_trigger_bars, "v23.3 Trigger Bars", display=display.none)
+plot(cgb_fired_count, "v23.3 CGB Fired Count", display=display.none)
+plot(cgb_profit_captured_total, "v23.3 CGB Profit Captured", display=display.none)
+plot(exit_called_this_bar ? 1 : 0, "v23.3 Exit Called", display=display.none)
+plot(regime_score_long, "Regime Score Long", display=display.none)
+plot(regime_score_short, "Regime Score Short", display=display.none)
+plot(daily_pnl_pct, "Daily PnL %", display=display.none)
+plot(current_dd_pct, "Current DD %", display=display.none)
+plot(trigger_value, "v23.3 Trigger Value", display=display.none)
+plot(min_keep_value, "v23.3 Min Keep Value", display=display.none)
+plot(nz(est_commission_per_trade), "v23.3 Est Commission", display=display.none)
+plot(trigger_profit_basis, "v23.3 Trigger Basis $", display=display.none)
+
+// ============================================================================
+// DEBUG TABLE (36 rows — thêm 2 so với v23.1: CGB tracker + commission guard)
+// ============================================================================
+var table t = table.new(position.top_right, 2, 36, bgcolor=color.new(color.black, 25), border_color=color.new(color.gray, 60), border_width=1)
+if show_table and barstate.islast
+    table.cell(t, 0, 0, "v23.3 Final FT", text_color=color.white, bgcolor=color.new(color.navy, 15))
+    table.cell(t, 1, 0, preset, text_color=color.white, bgcolor=color.new(color.navy, 15))
+    table.cell(t, 0, 1, "Session", text_color=color.white)
+    table.cell(t, 1, 1, in_london ? "LONDON" : in_ny ? "NY" : "OFF", text_color=in_london ? color.yellow : in_ny ? color.aqua : color.gray)
+    table.cell(t, 0, 2, "EMA Trend", text_color=color.white)
+    table.cell(t, 1, 2, trend_up ? "UP" : trend_down ? "DOWN" : "FLAT", text_color=trend_up ? color.lime : trend_down ? color.red : color.gray)
+    table.cell(t, 0, 3, "ADX / DI", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(math.round(adx_val, 1)) + " | +" + str.tostring(math.round(plus_di, 1)) + " -" + str.tostring(math.round(minus_di, 1)), text_color=adx_ok and di_buy_ok ? color.lime : color.gray)
+    table.cell(t, 0, 4, "Regime L/S", text_color=color.white)
+    table.cell(t, 1, 4, str.tostring(regime_score_long) + "/" + str.tostring(regime_score_short) + " (min " + str.tostring(min_regime_score) + ")", text_color=regime_long_ok ? color.lime : color.red)
+    table.cell(t, 0, 5, "Daily PnL%", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(math.round(daily_pnl_pct, 2)) + "%", text_color=daily_loss_breached ? color.red : daily_pnl_pct >= 0 ? color.lime : color.orange)
+    table.cell(t, 0, 6, "Drawdown%", text_color=color.white)
+    table.cell(t, 1, 6, str.tostring(math.round(current_dd_pct, 2)) + "%", text_color=dd_breached ? color.red : color.yellow)
+    table.cell(t, 0, 7, "Risk Guards", text_color=color.white)
+    table.cell(t, 1, 7, daily_loss_breached ? "DAILY-LOSS" : dd_breached ? "DD-BREACH" : in_cooldown ? "COOLDOWN" : no_friday_hold ? "FRI-CLOSE" : "OK", text_color=daily_loss_breached or dd_breached ? color.red : in_cooldown or no_friday_hold ? color.orange : color.lime)
+    table.cell(t, 0, 8, "In Trade / Bars", text_color=color.white)
+    table.cell(t, 1, 8, (in_trade ? (in_long ? "LONG" : "SHORT") : "NO") + " / " + str.tostring(bars_in_trade) + (in_cooldown ? " (CD)" : ""), text_color=in_trade ? color.lime : color.gray)
+    table.cell(t, 0, 9, "Current R", text_color=color.white)
+    table.cell(t, 1, 9, str.tostring(math.round(current_r, 2)), text_color=current_r >= 0 ? color.lime : color.red)
+    table.cell(t, 0, 10, "Open Profit $", text_color=color.white)
+    table.cell(t, 1, 10, str.tostring(math.round(strategy_profit_now, 2)), text_color=strategy_profit_now >= 0 ? color.lime : color.red)
+    table.cell(t, 0, 11, "Max Open Profit $", text_color=color.white)
+    table.cell(t, 1, 11, str.tostring(math.round(nz(max_strategy_open_profit), 2)), text_color=trigger_profit_basis >= trigger_value ? color.yellow : color.gray)
+    table.cell(t, 0, 12, "Trigger Mode", text_color=color.white)
+    table.cell(t, 1, 12, trigger_mode + " | val=" + str.tostring(math.round(trigger_value, 2)), text_color=currency_trigger_raw ? color.yellow : color.gray)
+    table.cell(t, 0, 13, "Min Keep", text_color=color.white)
+    table.cell(t, 1, 13, str.tostring(math.round(min_keep_value, 2)) + "$", text_color=currency_keep_pass ? color.lime : color.orange)
+    table.cell(t, 0, 14, "Giveback %", text_color=color.white)
+    table.cell(t, 1, 14, str.tostring(math.round(intrabar_gb_pct, 1)) + "% / " + str.tostring(harness_giveback_pct) + "%", text_color=currency_exit_raw ? color.blue : currency_near_raw ? color.aqua : color.gray)
+    table.cell(t, 0, 15, "CGB Block", text_color=color.white)
+    table.cell(t, 1, 15, cgb_block_reason, text_color=currency_exit_raw ? color.blue : cgb_block_reason == "FAIL MIN KEEP" or cgb_block_reason == "FAIL COMM GUARD" ? color.red : cgb_block_reason == "WAIT GIVEBACK" ? color.yellow : color.gray)
+    table.cell(t, 0, 16, "CGB State", text_color=color.white)
+    table.cell(t, 1, 16, currency_exit_raw ? (execute_harness_exit ? "EXIT" : "RAW") : currency_near_raw ? "NEAR" : currency_trigger_raw ? "ARMED" : "OFF", text_color=currency_exit_raw ? color.blue : currency_near_raw ? color.aqua : currency_trigger_raw ? color.yellow : color.gray)
+    // [C5] CGB tracker — key metric để verify CGB đang chạy
+    table.cell(t, 0, 17, "CGB Fired Total", text_color=color.white)
+    table.cell(t, 1, 17, str.tostring(cgb_fired_count) + " exits | +" + str.tostring(math.round(cgb_profit_captured_total, 2)) + "$", text_color=cgb_fired_count > 0 ? color.lime : color.orange)
+    // [C4] Commission guard info
+    table.cell(t, 0, 18, "Comm Guard", text_color=color.white)
+    table.cell(t, 1, 18, use_commission_guard ? (commission_guard_pass ? "PASS ≥ " + str.tostring(math.round(commission_guard_min, 2)) + "$" : "FAIL " + str.tostring(math.round(commission_guard_min, 2)) + "$") : "OFF", text_color=not use_commission_guard ? color.gray : commission_guard_pass ? color.lime : color.red)
+    table.cell(t, 0, 19, "Est Commission", text_color=color.white)
+    table.cell(t, 1, 19, na(est_commission_per_trade) ? "na" : str.tostring(math.round(est_commission_per_trade, 2)) + "$ x " + str.tostring(commission_guard_mult) + " = " + str.tostring(math.round(commission_guard_min, 2)) + "$", text_color=color.gray)
+    table.cell(t, 0, 20, "Pos Size / PV", text_color=color.white)
+    table.cell(t, 1, 20, str.tostring(math.round(strategy.position_size, 3)) + " / " + str.tostring(syminfo.pointvalue), text_color=color.white)
+    table.cell(t, 0, 21, "Risk Sizing", text_color=color.white)
+    table.cell(t, 1, 21, effective_size_mode + " " + str.tostring(risk_per_trade_pct) + "% | cap=" + str.tostring(max_qty_cap), text_color=use_risk_sizing ? color.yellow : color.aqua)
+    table.cell(t, 0, 22, "EMA Dist ATR", text_color=color.white)
+    table.cell(t, 1, 22, str.tostring(math.round(ema_distance_atr, 2)), text_color=pullback_ok and extension_ok ? color.lime : color.orange)
+    table.cell(t, 0, 23, "Candle ATR", text_color=color.white)
+    table.cell(t, 1, 23, str.tostring(math.round(signal_range_atr, 2)), text_color=big_candle_ok and min_body_ok ? color.lime : color.orange)
+    table.cell(t, 0, 24, "Symbol/TF", text_color=color.white)
+    table.cell(t, 1, 24, syminfo.ticker + " / " + timeframe.period, text_color=color.white)
+    table.cell(t, 0, 25, "Status", text_color=color.white)
+    table.cell(t, 1, 25, execute_harness_exit ? "PRODUCTION" : "DEBUG", text_color=execute_harness_exit ? color.lime : color.orange)
+    table.cell(t, 0, 26, "Intrabar GB/TRG", text_color=color.white)
+    table.cell(t, 1, 26, "GB=" + (use_intrabar_mfe ? "ON" : "OFF") + " | TRG=" + (use_intrabar_trigger ? "ON (v23.3)" : "OFF (v23.2)"), text_color=use_intrabar_trigger ? color.lime : color.orange)
+    table.cell(t, 0, 27, "CGB Gates", text_color=color.white)
+    table.cell(t, 1, 27, "T=" + (currency_trigger_raw ? "Y" : "N") + " | GB=" + (currency_giveback_pass ? "Y" : "N") + " | K=" + (currency_keep_pass ? "Y" : "N") + " | C=" + (commission_guard_pass ? "Y" : "N"), text_color=currency_exit_raw ? color.blue : currency_trigger_raw ? color.yellow : color.gray)
+    table.cell(t, 0, 28, "CGB Max GB Seen", text_color=color.white)
+    table.cell(t, 1, 28, str.tostring(math.round(nz(cgb_max_giveback_seen), 1)) + "%", text_color=nz(cgb_max_giveback_seen) >= harness_giveback_pct ? color.lime : color.orange)
+    table.cell(t, 0, 29, "CGB Bars T/GB/K", text_color=color.white)
+    table.cell(t, 1, 29, str.tostring(cgb_trigger_bars) + " / " + str.tostring(cgb_giveback_bars) + " / " + str.tostring(cgb_keep_bars), text_color=color.white)
+    table.cell(t, 0, 30, "Effective Session", text_color=color.white)
+    table.cell(t, 1, 30, effective_session_mode + " | allowed=" + (session_allowed ? "YES" : "NO"), text_color=session_allowed ? color.lime : color.red)
+    table.cell(t, 0, 31, "Effective Filters", text_color=color.white)
+    table.cell(t, 1, 31, "ADX=" + str.tostring(adx_threshold) + " PB=" + str.tostring(pullback_atr_mult) + " B=" + str.tostring(min_body_atr), text_color=color.white)
+    table.cell(t, 0, 32, "Closed Trades", text_color=color.white)
+    table.cell(t, 1, 32, str.tostring(strategy.closedtrades) + " | W=" + str.tostring(strategy.wintrades) + " L=" + str.tostring(strategy.losstrades), text_color=strategy.closedtrades >= 30 ? color.lime : color.orange)
+    table.cell(t, 0, 33, "Net Profit", text_color=color.white)
+    table.cell(t, 1, 33, str.tostring(math.round(strategy.netprofit, 2)) + "$ (" + str.tostring(math.round(strategy.netprofit / strategy.initial_capital * 100, 2)) + "%)", text_color=strategy.netprofit >= 0 ? color.lime : color.red)
+    table.cell(t, 0, 34, "Profit Factor", text_color=color.white)
+    float pf = math.abs(strategy.grossloss) > 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+    table.cell(t, 1, 34, na(pf) ? "N/A" : str.tostring(math.round(pf, 3)), text_color=na(pf) ? color.gray : pf >= 1.5 ? color.lime : pf >= 1.0 ? color.orange : color.red)
+    table.cell(t, 0, 35, "v23.3 Change vs v23.2", text_color=color.white)
+    table.cell(t, 1, 35, "Trigger basis=" + (use_intrabar_trigger ? "INTRABAR" : "close-bar") + " | basis$=" + str.tostring(math.round(trigger_profit_basis, 2)), text_color=color.aqua)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+if new_long
+    alert("CanNX v23.3-H1 BUY " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Regime=" + str.tostring(regime_score_long) + "/4" +
+          " | EMADist=" + str.tostring(math.round(ema_distance_atr, 2)) +
+          " | CandleATR=" + str.tostring(math.round(signal_range_atr, 2)) +
+          " | Qty=" + str.tostring(math.round(trade_qty, 2)) +
+          " | Trigger=" + str.tostring(math.round(trigger_value, 2)) + "$",
+          alert.freq_once_per_bar_close)
+if new_short
+    alert("CanNX v23.3-H1 SELL " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Regime=" + str.tostring(regime_score_short) + "/4" +
+          " | Qty=" + str.tostring(math.round(trade_qty, 2)),
+          alert.freq_once_per_bar_close)
+if currency_near_raw
+    alert("CanNX v23.3 CGB Near " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Profit=" + str.tostring(math.round(strategy_profit_now, 2)) +
+          " | MaxProfit=" + str.tostring(math.round(nz(max_strategy_open_profit), 2)) +
+          " | GB%=" + str.tostring(math.round(intrabar_gb_pct, 1)) + "%" +
+          " | Trigger=" + str.tostring(math.round(trigger_value, 2)) + "$",
+          alert.freq_once_per_bar_close)
+if currency_exit_raw and execute_harness_exit
+    alert("CanNX v23.3 CGB Exit " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Profit=" + str.tostring(math.round(strategy_profit_now, 2)) +
+          " | MaxProfit=" + str.tostring(math.round(nz(max_strategy_open_profit), 2)) +
+          " | GB%=" + str.tostring(math.round(intrabar_gb_pct, 1)) + "%" +
+          " | TotalCGBFired=" + str.tostring(cgb_fired_count + 1),
+          alert.freq_once_per_bar_close)
+if exit_called_this_bar
+    alert("CanNX v23.3 Exit " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | Reason=" + (currency_exit_raw ? "CGB" : daily_loss_breached ? "DAILY-LOSS" : dd_breached ? "DD-BREAK" : no_friday_hold ? "FRIDAY" : "OTHER"),
+          alert.freq_once_per_bar_close)
+if daily_loss_breached and in_trade
+    alert("CanNX v23.3 Daily Loss Limit " + syminfo.ticker + " | DailyPnL=" + str.tostring(math.round(daily_pnl_pct, 2)) + "%",
+          alert.freq_once_per_bar_close)
+if dd_breached and in_trade
+    alert("CanNX v23.3 DD Circuit Breaker " + syminfo.ticker + " | DD=" + str.tostring(math.round(current_dd_pct, 2)) + "%",
+          alert.freq_once_per_bar_close)
