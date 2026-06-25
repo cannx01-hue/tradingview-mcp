@@ -91,3 +91,31 @@ Vẽ 4 loại vùng trên cùng một biểu đồ:
 2. Tab **Notifications** → bật **Play sound** → **Create**.
 
 > Mẹo chỉnh độ nhạy OB theo từng mã: tăng **Biên độ cú đẩy tối thiểu (%)** nếu có quá nhiều OB; giảm nếu quá ít. Mã biến động mạnh (crypto/futures) thường cần ngưỡng cao hơn cổ phiếu.
+
+---
+
+# CanNX TC V3 — Trend Confluence cải tiến (indicator + strategy)
+
+Bản nâng cấp của `CanNX - mInvest Trend Confluence V2`, vào lệnh **hợp lưu đa khung** chất lượng cao hơn cho XAUUSD.
+
+> File: [`CanNX_TC_V3.pine`](./CanNX_TC_V3.pine) (indicator/alert) · [`CanNX_TC_V3_Strategy.pine`](./CanNX_TC_V3_Strategy.pine) (backtest)
+
+## Cải tiến so với V2
+
+- **Thuận trend đa khung**: bắt buộc cùng chiều EMA khung **H4** (tùy chọn **Daily**) qua `request.security` (không repaint).
+- **ADX có hướng**: ngoài độ lớn ADX còn yêu cầu **+DI/−DI thuận hướng** lệnh.
+- **Lọc RSI động lượng**: tránh mua vùng quá mua / bán vùng quá bán.
+- **Bắt buộc hồi về EMA nhanh** (mua đáy / bán đỉnh trong xu hướng) — đòn bẩy chất lượng lớn nhất.
+- **Engulfing chặt** (thân hiện tại > thân trước).
+- Tất cả bộ lọc **bật/tắt được**; kèm bản `strategy()` để đo win rate.
+
+## Kết quả backtest (XAUUSD H1, ~2024–2026)
+
+| Cấu hình | Win rate | Profit Factor | Max DD |
+|----------|----------|---------------|--------|
+| Như V2 (RR1.8, 2 chiều) | 33% | 0.76 | 2.18% |
+| **Tối ưu (mặc định V3)**: chỉ Mua, RR 1.2, pullback 0.3 | **~50%** | **~1.1–1.18** | **~0.34%** |
+
+Default đã đặt sẵn theo cấu hình tối ưu: `RR = 1.2`, `pullback = 0.3×ATR`, **hướng = Chỉ Mua**.
+
+> ⚠️ **Lưu ý quan trọng**: kết quả tối ưu trên giai đoạn **vàng tăng giá mạnh** nên *long-only* là tốt nhất — đây là **phụ thuộc thị trường (regime)**, không phải quy luật vĩnh viễn. Nếu vàng chuyển sang giảm/sideways, hãy đổi **Hướng giao dịch** sang "Cả hai" hoặc "Chỉ Bán" và backtest lại. Backtest không bảo đảm kết quả tương lai; luôn quản lý vốn.
