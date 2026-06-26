@@ -1,0 +1,365 @@
+// © mInvest / CanNX
+//@version=5
+indicator(title="CanNX - mInvest Trend Confluence V3", shorttitle="CanNX mInvest TC V3", overlay=true, max_lines_count=200, max_labels_count=300)
+
+// ============================================================
+// V3 = V2 (EMA + ADX + nến đảo chiều → tín hiệu MUA/BÁN + SL/TP)
+//      + TÍCH HỢP QUẢN LÝ VỐN: tự tính khối lượng (Vol) sao cho
+//        rủi ro khi chạm SL ≤ X% vốn cho mỗi lệnh.
+//        Vol hiển thị trên label SL, bảng thông tin và trong alert.
+// ============================================================
+
+// ============================================================
+// PHẦN 1: THAM SỐ ĐẦU VÀO
+// ============================================================
+
+// --- Tham số EMA ---
+ema_fast_len  = input.int(21,  title="EMA Nhanh (Fast)", group="⚙️ Cài đặt EMA", minval=1)
+ema_slow_len  = input.int(55,  title="EMA Chậm (Slow)",  group="⚙️ Cài đặt EMA", minval=1)
+
+// --- Tham số ADX ---
+adx_len       = input.int(14,   title="Độ dài ADX", group="⚙️ Cài đặt ADX", minval=1)
+adx_threshold = input.float(25, title="Ngưỡng ADX xác nhận xu hướng", group="⚙️ Cài đặt ADX", minval=1)
+
+// --- Tham số ATR / SL-TP ---
+atr_len        = input.int(14,    title="Độ dài ATR", group="⚙️ Cài đặt SL/TP", minval=1)
+rr_ratio       = input.float(1.5, title="Tỷ lệ Risk:Reward (RR)", group="⚙️ Cài đặt SL/TP", minval=0.1, step=0.1)
+sl_buffer_mult = input.float(0.5, title="Hệ số đệm ATR cho SL", group="⚙️ Cài đặt SL/TP", minval=0.0, step=0.1)
+line_ext_bars  = input.int(30,    title="Số nến kéo dài đường SL/TP", group="⚙️ Cài đặt SL/TP", minval=1, maxval=200)
+
+// --- [V3] Tham số QUẢN LÝ VỐN (Position Sizing) ---
+use_sizing       = input.bool(true,   title="Bật tính khối lượng theo rủi ro", group="💰 Quản lý vốn (V3)",
+     tooltip="Tính Vol sao cho khi giá chạm SL, lỗ ≤ (Rủi ro %) × Vốn. Vol = (Vốn × Risk%) / (khoảng cách SL × Giá trị điểm), làm tròn XUỐNG theo Bước.")
+account_capital  = input.float(100000, title="Vốn tài khoản (USD)", group="💰 Quản lý vốn (V3)", minval=1, step=100)
+risk_pct         = input.float(2.0,    title="Rủi ro tối đa mỗi lệnh (% vốn)", group="💰 Quản lý vốn (V3)", minval=0.05, step=0.05)
+point_value      = input.float(1.0,    title="Lãi/lỗ (USD) mỗi 1.0 giá cho 1 đơn vị (XAUUSD = 1)", group="💰 Quản lý vốn (V3)", minval=0.0001, step=0.1,
+     tooltip="XAUUSD spot: 1 đơn vị = 1 oz, biến động $1 giá = $1 → để 1.0. Hợp đồng/lot khác thì chỉnh theo đặc tả symbol.")
+qty_step         = input.float(0.01,   title="Bước làm tròn khối lượng", group="💰 Quản lý vốn (V3)", minval=0.0001, step=0.01)
+max_qty          = input.float(0,      title="Khối lượng tối đa (0 = không giới hạn)", group="💰 Quản lý vốn (V3)", minval=0, step=1)
+
+// --- Tham số lọc tín hiệu (chống nhiễu / chống repaint) ---
+wait_confirm = input.bool(true, title="Chỉ xác nhận tín hiệu khi nến đã đóng (chống repaint)",
+     group="🛡️ Lọc tín hiệu",
+     tooltip="Khi tắt, mũi tên tín hiệu có thể xuất hiện rồi biến mất ngay trong lúc nến đang hình thành (repaint). Nên giữ BẬT để tín hiệu đáng tin cậy hơn, đặc biệt khi dùng cho cảnh báo (alert).")
+min_gap_bars = input.int(0, title="Số nến tối thiểu giữa 2 tín hiệu cùng loại (0 = không lọc)",
+     group="🛡️ Lọc tín hiệu", minval=0)
+
+// --- Tùy chọn hiển thị ---
+show_bg       = input.bool(true, title="Hiển thị màu nền xu hướng", group="🎨 Tùy chọn hiển thị")
+show_sl_tp    = input.bool(true, title="Hiển thị đường SL/TP", group="🎨 Tùy chọn hiển thị")
+max_sltp_sets = input.int(5, title="Số bộ SL/TP tối đa giữ trên chart", group="🎨 Tùy chọn hiển thị", minval=1, maxval=50)
+color_up      = input.color(color.green, title="Màu xu hướng Tăng / MUA", group="🎨 Tùy chọn hiển thị")
+color_down    = input.color(color.red,   title="Màu xu hướng Giảm / BÁN", group="🎨 Tùy chọn hiển thị")
+
+// ============================================================
+// PHẦN 2: TÍNH TOÁN CHỈ BÁO
+// ============================================================
+
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+
+tr_val    = ta.tr(true)
+up_move   = high - high[1]
+down_move = low[1] - low
+
+plus_dm  = (up_move > down_move and up_move > 0) ? up_move : 0.0
+minus_dm = (down_move > up_move and down_move > 0) ? down_move : 0.0
+
+smooth_tr       = ta.rma(tr_val,   adx_len)
+smooth_plus_dm  = ta.rma(plus_dm,  adx_len)
+smooth_minus_dm = ta.rma(minus_dm, adx_len)
+
+plus_di  = smooth_tr != 0 ? (smooth_plus_dm  / smooth_tr) * 100 : 0.0
+minus_di = smooth_tr != 0 ? (smooth_minus_dm / smooth_tr) * 100 : 0.0
+
+dx_val  = (plus_di + minus_di) != 0 ? (math.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100 : 0.0
+adx_val = ta.rma(dx_val, adx_len)
+
+atr_val = ta.atr(atr_len)
+
+// ============================================================
+// PHẦN 3: NHẬN DIỆN MÔ HÌNH NẾN
+// ============================================================
+
+body       = math.abs(close - open)
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+
+bullish_engulfing = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+hammer = body > 0 and lower_wick >= 2 * body and upper_wick <= body * 0.5
+bearish_engulfing = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+shooting_star = body > 0 and upper_wick >= 2 * body and lower_wick <= body * 0.5
+
+is_bullish_pattern = bullish_engulfing or hammer
+is_bearish_pattern = bearish_engulfing or shooting_star
+
+// ============================================================
+// PHẦN 4: LOGIC TÍN HIỆU MUA / BÁN
+// ============================================================
+
+trend_up   = ema_fast > ema_slow
+trend_down = ema_fast < ema_slow
+adx_ok = adx_val > adx_threshold
+
+raw_buy  = trend_up   and adx_ok and is_bullish_pattern
+raw_sell = trend_down and adx_ok and is_bearish_pattern
+
+confirmed_ok = not wait_confirm or barstate.isconfirmed
+
+var int last_buy_signal_bar  = na
+var int last_sell_signal_bar = na
+
+gap_ok_buy  = min_gap_bars <= 0 or na(last_buy_signal_bar)  or (bar_index - last_buy_signal_bar)  >= min_gap_bars
+gap_ok_sell = min_gap_bars <= 0 or na(last_sell_signal_bar) or (bar_index - last_sell_signal_bar) >= min_gap_bars
+
+buy_signal  = raw_buy  and confirmed_ok and gap_ok_buy
+sell_signal = raw_sell and confirmed_ok and gap_ok_sell
+
+if buy_signal
+    last_buy_signal_bar := bar_index
+if sell_signal
+    last_sell_signal_bar := bar_index
+
+// ============================================================
+// PHẦN 5: TÍNH TOÁN MỨC SL VÀ TP
+// ============================================================
+
+buy_sl = low  - sl_buffer_mult * atr_val
+buy_tp = close + rr_ratio * (close - buy_sl)
+
+sell_sl = high + sl_buffer_mult * atr_val
+sell_tp = close - rr_ratio * (sell_sl - close)
+
+// ============================================================
+// PHẦN 5B: [V3] TÍNH KHỐI LƯỢNG THEO RỦI RO (SL ≤ risk% vốn)
+// ============================================================
+// Entry giả định = giá đóng nến tín hiệu (vào lệnh market).
+// risk_usd = vốn × risk%/100. Vol = risk_usd / (khoảng_cách_SL × point_value).
+// Làm tròn XUỐNG theo qty_step để đảm bảo rủi ro KHÔNG vượt ngưỡng.
+
+risk_usd = account_capital * risk_pct / 100.0
+
+f_calc_qty(float sl_dist) =>
+    float q = na
+    if sl_dist > 0 and point_value > 0 and qty_step > 0
+        float raw = risk_usd / (sl_dist * point_value)
+        q := math.floor(raw / qty_step) * qty_step
+        if max_qty > 0
+            q := math.min(q, max_qty)
+    q
+
+buy_sl_dist  = close - buy_sl
+sell_sl_dist = sell_sl - close
+buy_qty  = use_sizing ? f_calc_qty(buy_sl_dist)  : na
+sell_qty = use_sizing ? f_calc_qty(sell_sl_dist) : na
+
+// rủi ro thực tế (USD) theo Vol đã làm tròn — luôn ≤ risk_usd
+buy_risk_usd  = na(buy_qty)  ? na : buy_qty  * buy_sl_dist  * point_value
+sell_risk_usd = na(sell_qty) ? na : sell_qty * sell_sl_dist * point_value
+
+// Lưu lại kế hoạch lệnh gần nhất để hiển thị ở bảng
+var string last_dir   = na
+var float  last_entry = na
+var float  last_sl    = na
+var float  last_tp    = na
+var float  last_qty   = na
+var float  last_risk  = na
+if buy_signal
+    last_dir   := "MUA"
+    last_entry := close
+    last_sl    := buy_sl
+    last_tp    := buy_tp
+    last_qty   := buy_qty
+    last_risk  := buy_risk_usd
+if sell_signal
+    last_dir   := "BÁN"
+    last_entry := close
+    last_sl    := sell_sl
+    last_tp    := sell_tp
+    last_qty   := sell_qty
+    last_risk  := sell_risk_usd
+
+f_qty_str(float q) => na(q) ? "—" : str.tostring(q, "#.####")
+
+// ============================================================
+// PHẦN 6: VẼ ĐƯỜNG EMA VÀ MÀU NỀN
+// ============================================================
+
+plot(ema_fast, title="EMA Nhanh", color=color.new(color_up,   0), linewidth=2)
+plot(ema_slow, title="EMA Chậm",  color=color.new(color_down, 0), linewidth=2)
+
+bg_color = show_bg ? (trend_up ? color.new(color_up, 90) : trend_down ? color.new(color_down, 90) : na) : na
+bgcolor(bg_color, title="Màu nền xu hướng")
+
+// ============================================================
+// PHẦN 7: VẼ MŨI TÊN TÍN HIỆU MUA / BÁN
+// ============================================================
+
+plotshape(buy_signal,  title="Tín hiệu MUA", style=shape.triangleup,
+     location=location.belowbar, color=color.new(color_up, 0),
+     size=size.normal, text="MUA", textcolor=color_up)
+
+plotshape(sell_signal, title="Tín hiệu BÁN", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color_down, 0),
+     size=size.normal, text="BÁN", textcolor=color_down)
+
+// ============================================================
+// PHẦN 8: VẼ ĐƯỜNG SL VÀ TP + NHÃN VOL (quản lý bộ nhớ)
+// ============================================================
+
+var array<line>  sl_lines  = array.new<line>()
+var array<line>  tp_lines  = array.new<line>()
+var array<label> sl_labels = array.new<label>()
+var array<label> tp_labels = array.new<label>()
+
+manage_line(array<line> arr, line new_ln, int max_count) =>
+    array.push(arr, new_ln)
+    if array.size(arr) > max_count
+        line.delete(array.shift(arr))
+
+manage_label(array<label> arr, label new_lb, int max_count) =>
+    array.push(arr, new_lb)
+    if array.size(arr) > max_count
+        label.delete(array.shift(arr))
+
+if show_sl_tp
+    if buy_signal
+        ln_sl = line.new(bar_index, buy_sl, bar_index + line_ext_bars, buy_sl,
+             color=color.new(color_down, 0), width=1, style=line.style_dashed)
+        manage_line(sl_lines, ln_sl, max_sltp_sets)
+        // [V3] nhãn SL kèm Vol đề xuất
+        sl_lbl_txt = use_sizing ? ("SL · Vol " + f_qty_str(buy_qty)) : "SL"
+        lb_sl = label.new(bar_index + line_ext_bars, buy_sl, text=sl_lbl_txt,
+             color=color.new(color_down, 80), textcolor=color_down,
+             style=label.style_label_left, size=size.small)
+        manage_label(sl_labels, lb_sl, max_sltp_sets)
+
+        ln_tp = line.new(bar_index, buy_tp, bar_index + line_ext_bars, buy_tp,
+             color=color.new(color_up, 0), width=1, style=line.style_dashed)
+        manage_line(tp_lines, ln_tp, max_sltp_sets)
+        lb_tp = label.new(bar_index + line_ext_bars, buy_tp, text="TP",
+             color=color.new(color_up, 80), textcolor=color_up,
+             style=label.style_label_left, size=size.small)
+        manage_label(tp_labels, lb_tp, max_sltp_sets)
+
+    if sell_signal
+        ln_sl2 = line.new(bar_index, sell_sl, bar_index + line_ext_bars, sell_sl,
+             color=color.new(color_down, 0), width=1, style=line.style_dashed)
+        manage_line(sl_lines, ln_sl2, max_sltp_sets)
+        sl_lbl_txt2 = use_sizing ? ("SL · Vol " + f_qty_str(sell_qty)) : "SL"
+        lb_sl2 = label.new(bar_index + line_ext_bars, sell_sl, text=sl_lbl_txt2,
+             color=color.new(color_down, 80), textcolor=color_down,
+             style=label.style_label_left, size=size.small)
+        manage_label(sl_labels, lb_sl2, max_sltp_sets)
+
+        ln_tp2 = line.new(bar_index, sell_tp, bar_index + line_ext_bars, sell_tp,
+             color=color.new(color_up, 0), width=1, style=line.style_dashed)
+        manage_line(tp_lines, ln_tp2, max_sltp_sets)
+        lb_tp2 = label.new(bar_index + line_ext_bars, sell_tp, text="TP",
+             color=color.new(color_up, 80), textcolor=color_up,
+             style=label.style_label_left, size=size.small)
+        manage_label(tp_labels, lb_tp2, max_sltp_sets)
+
+// ============================================================
+// PHẦN 9: BẢNG THÔNG TIN (GÓC TRÊN BÊN PHẢI) — V3 thêm khối lượng
+// ============================================================
+
+var table info_table = table.new(
+     position=position.top_right, columns=2, rows=10,
+     bgcolor=color.new(color.black, 20),
+     border_color=color.new(color.gray, 50), border_width=1)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, text="mInvest TC V3",
+         text_color=color.white, text_size=size.small,
+         bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
+    table.cell(info_table, 1, 0, text="Trạng thái",
+         text_color=color.white, text_size=size.small,
+         bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
+
+    ema_trend_txt   = trend_up ? "Tăng ▲" : trend_down ? "Giảm ▼" : "Trung lập ─"
+    ema_trend_color = trend_up ? color_up : trend_down ? color_down : color.gray
+    table.cell(info_table, 0, 1, text="EMA Trend",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(info_table, 1, 1, text=ema_trend_txt,
+         text_color=ema_trend_color, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    adx_color = adx_ok ? color.lime : color.red
+    table.cell(info_table, 0, 2, text="ADX",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(info_table, 1, 2, text=str.tostring(math.round(adx_val, 2)),
+         text_color=adx_color, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    candle_txt   = is_bullish_pattern ? "Bullish" : is_bearish_pattern ? "Bearish" : "Không có"
+    candle_color = is_bullish_pattern ? color_up : is_bearish_pattern ? color_down : color.gray
+    table.cell(info_table, 0, 3, text="Mô hình nến",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(info_table, 1, 3, text=candle_txt,
+         text_color=candle_color, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    signal_txt   = buy_signal ? "MUA 🟢" : sell_signal ? "BÁN 🔴" : (wait_confirm and not barstate.isconfirmed and (raw_buy or raw_sell)) ? "Đang chờ đóng nến…" : "Chờ ─"
+    signal_color = buy_signal ? color_up : sell_signal ? color_down : color.gray
+    table.cell(info_table, 0, 4, text="Tín hiệu",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(info_table, 1, 4, text=signal_txt,
+         text_color=signal_color, text_size=size.small, bgcolor=color.new(color.black, 30))
+
+    // --- [V3] khối quản lý vốn ---
+    table.cell(info_table, 0, 5, text="💰 Vốn / Risk",
+         text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black, 55))
+    table.cell(info_table, 1, 5, text=str.tostring(account_capital, "#") + " / " + str.tostring(risk_pct, "#.##") + "% (≈$" + str.tostring(risk_usd, "#") + ")",
+         text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black, 55))
+
+    last_plan_txt = na(last_dir) ? "—" : (last_dir + " @ " + str.tostring(last_entry, format.mintick))
+    last_plan_col = na(last_dir) ? color.gray : (last_dir == "MUA" ? color_up : color_down)
+    table.cell(info_table, 0, 6, text="Lệnh gần nhất",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(info_table, 1, 6, text=last_plan_txt,
+         text_color=last_plan_col, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    sltp_txt = na(last_sl) ? "—" : (str.tostring(last_sl, format.mintick) + " / " + str.tostring(last_tp, format.mintick))
+    table.cell(info_table, 0, 7, text="SL / TP",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(info_table, 1, 7, text=sltp_txt,
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    vol_txt = na(last_qty) ? "—" : (f_qty_str(last_qty) + "  (risk ≈$" + str.tostring(last_risk, "#") + ")")
+    table.cell(info_table, 0, 8, text="Vol (SL≤" + str.tostring(risk_pct, "#.##") + "%)",
+         text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(info_table, 1, 8, text=vol_txt,
+         text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black, 30))
+
+    // dòng gợi ý live: nếu vào lệnh NGAY theo hướng EMA hiện tại thì Vol bao nhiêu
+    live_dist = trend_up ? (close - (low - sl_buffer_mult * atr_val)) : trend_down ? ((high + sl_buffer_mult * atr_val) - close) : na
+    live_qty  = use_sizing and not na(live_dist) ? f_calc_qty(live_dist) : na
+    table.cell(info_table, 0, 9, text="Vol nếu vào nay",
+         text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 45))
+    table.cell(info_table, 1, 9, text=f_qty_str(live_qty),
+         text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 45))
+
+// ============================================================
+// PHẦN 10: CẢNH BÁO (ALERT) — kèm Vol/SL/TP động
+// ============================================================
+
+// Alert động (alert()): chứa Vol đã tính, SL, TP, rủi ro USD
+if buy_signal
+    alert("CanNX TC V3 MUA " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
+          " | SL " + str.tostring(buy_sl, format.mintick) +
+          " | TP " + str.tostring(buy_tp, format.mintick) +
+          " | Vol " + f_qty_str(buy_qty) +
+          " | Risk ≈$" + str.tostring(buy_risk_usd, "#") + " (" + str.tostring(risk_pct, "#.##") + "% vốn)",
+          alert.freq_once_per_bar_close)
+
+if sell_signal
+    alert("CanNX TC V3 BÁN " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
+          " | SL " + str.tostring(sell_sl, format.mintick) +
+          " | TP " + str.tostring(sell_tp, format.mintick) +
+          " | Vol " + f_qty_str(sell_qty) +
+          " | Risk ≈$" + str.tostring(sell_risk_usd, "#") + " (" + str.tostring(risk_pct, "#.##") + "% vốn)",
+          alert.freq_once_per_bar_close)
+
+// Alert tĩnh (alertcondition) — tương thích kiểu cũ
+alertcondition(buy_signal,  title="TC V3 - Tín hiệu MUA",
+     message="CanNX TC V3: MUA {{ticker}} @ {{close}} (xem Vol/SL/TP trên bảng & alert động)")
+alertcondition(sell_signal, title="TC V3 - Tín hiệu BÁN",
+     message="CanNX TC V3: BÁN {{ticker}} @ {{close}} (xem Vol/SL/TP trên bảng & alert động)")
