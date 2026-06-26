@@ -30,10 +30,10 @@ line_ext_bars  = input.int(30,    title="Số nến kéo dài đường SL/TP", 
 // --- [V3] Tham số QUẢN LÝ VỐN (Position Sizing) ---
 use_sizing       = input.bool(true,   title="Bật tính khối lượng theo rủi ro", group="💰 Quản lý vốn (V3)",
      tooltip="Tính Vol sao cho khi giá chạm SL, lỗ ≤ (Rủi ro %) × Vốn. Vol = (Vốn × Risk%) / (khoảng cách SL × Giá trị điểm), làm tròn XUỐNG theo Bước.")
-account_capital  = input.float(100000, title="Vốn tài khoản (USD)", group="💰 Quản lý vốn (V3)", minval=1, step=100)
+account_capital  = input.float(1400,   title="Vốn tài khoản (USD)", group="💰 Quản lý vốn (V3)", minval=1, step=100)
 risk_pct         = input.float(2.0,    title="Rủi ro tối đa mỗi lệnh (% vốn)", group="💰 Quản lý vốn (V3)", minval=0.05, step=0.05)
-point_value      = input.float(1.0,    title="Lãi/lỗ (USD) mỗi 1.0 giá cho 1 đơn vị (XAUUSD = 1)", group="💰 Quản lý vốn (V3)", minval=0.0001, step=0.1,
-     tooltip="XAUUSD spot: 1 đơn vị = 1 oz, biến động $1 giá = $1 → để 1.0. Hợp đồng/lot khác thì chỉnh theo đặc tả symbol.")
+point_value      = input.float(100,    title="Lãi/lỗ (USD) mỗi 1.0 giá cho 1 đơn vị (XAUUSD lot=100, oz=1)", group="💰 Quản lý vốn (V3)", minval=0.0001, step=0.1,
+     tooltip="Tài khoản LOT (MT4/MT5): 1 lot XAUUSD = 100 oz → $1 giá = $100/lot → để 100. TradingView Paper theo oz → để 1.")
 qty_step         = input.float(0.01,   title="Bước làm tròn khối lượng", group="💰 Quản lý vốn (V3)", minval=0.0001, step=0.01)
 max_qty          = input.float(0,      title="Khối lượng tối đa (0 = không giới hạn)", group="💰 Quản lý vốn (V3)", minval=0, step=1)
 
